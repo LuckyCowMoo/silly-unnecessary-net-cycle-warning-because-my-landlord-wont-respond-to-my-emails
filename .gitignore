@@ -1,0 +1,7 @@
+logs/
+drivers/
+*.csv
+*.etl
+*.etl.zip
+.DS_Store
+Thumbs.db
