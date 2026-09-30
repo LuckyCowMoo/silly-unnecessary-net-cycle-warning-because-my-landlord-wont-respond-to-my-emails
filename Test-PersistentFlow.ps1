@@ -19,9 +19,10 @@ param(
   [string[]]$Servers = @("stun.l.google.com:19302", "stun1.l.google.com:19302", "stun.cloudflare.com:3478"),
   [int]$RateHz = 20,
   [int]$TimeoutMs = 1000,
-  [int]$DurationSec = 300,
+  [int]$DurationSec = 600,
   [int]$BurstThreshold = 3,
-  [string]$Label = "persistent"
+  [string]$Label = "persistent",
+  [bool]$SyncToFiveMin = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -101,10 +102,37 @@ if ($flows.Count -eq 0) { Write-Host "no usable STUN servers" -ForegroundColor R
 
 Write-Host ""
 Write-Host "=== Persistent UDP flow test (game-like) ===" -ForegroundColor Cyan
-Write-Host ("Rate {0} pkt/s per flow, duration {1}s, timeout {2}ms" -f $RateHz, $DurationSec, $TimeoutMs)
+Write-Host ("Rate {0} pkt/s per flow, duration {1} min, timeout {2}ms" -f $RateHz, ([math]::Round($DurationSec / 60, 1)), $TimeoutMs)
 Write-Host "Each flow keeps ONE socket and ONE source port for the entire run." -ForegroundColor Gray
 Write-Host "Play normally. Outages of 3+ consecutive packets are flagged." -ForegroundColor Yellow
 Write-Host ""
+
+if ($SyncToFiveMin) {
+  $now = Get-Date
+  $minuteFloor = Get-Date -Year $now.Year -Month $now.Month -Day $now.Day -Hour $now.Hour -Minute $now.Minute -Second 0 -Millisecond 0
+  $mod = $minuteFloor.Minute % 5
+  # A couple of seconds after :00/:05/... still counts as that mark, so a slow start
+  # does not push one machine onto the next slot.
+  if ($mod -eq 0 -and $now.Second -le 2) {
+    $boundary = $minuteFloor
+  } else {
+    $add = if ($mod -eq 0) { 5 } else { 5 - $mod }
+    $boundary = $minuteFloor.AddMinutes($add)
+  }
+  if ($boundary -gt (Get-Date)) {
+    Write-Host ("Waiting for the next 5-minute mark: {0:HH:mm:ss}" -f $boundary) -ForegroundColor Yellow
+    Write-Host "Start the other machine any time before that. Measurement begins together." -ForegroundColor Gray
+    while ((Get-Date) -lt $boundary.AddMilliseconds(-200)) {
+      $left = [math]::Ceiling(($boundary - (Get-Date)).TotalSeconds)
+      if ($left -lt 0) { $left = 0 }
+      Write-Host ("  {0:HH:mm:ss}  starts in {1}s" -f (Get-Date), $left) -ForegroundColor DarkGray
+      $sleep = [math]::Min(1, [math]::Max(0.05, ($boundary - (Get-Date)).TotalSeconds - 0.2))
+      Start-Sleep -Milliseconds ([int]($sleep * 1000))
+    }
+    while ((Get-Date) -lt $boundary) { }
+  }
+  Write-Host ("Starting on 5-minute mark {0:HH:mm:ss.fff}" -f (Get-Date)) -ForegroundColor Green
+}
 
 $rows = New-Object System.Collections.Generic.List[string]
 $rows.Add('timestamp,flow,event,detail')

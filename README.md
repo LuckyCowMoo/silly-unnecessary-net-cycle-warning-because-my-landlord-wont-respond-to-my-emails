@@ -8,13 +8,13 @@ Run the same test on two machines on the same Wi‑Fi. If both see similar loss/
 
 1. Clone or download this repo.
 2. Open PowerShell in the repo folder.
-3. Run a 5‑minute game-like UDP test:
+3. Double‑click `Run-OutageTest.bat` on both machines.
+
+The test waits until the next 5‑minute clock mark (`:00`, `:05`, `:10`, …), then runs for 10 minutes. Start both machines any time in the same 5‑minute window and they begin together.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\Test-PersistentFlow.ps1 -DurationSec 300 -RateHz 20 -Label laptop
+powershell -ExecutionPolicy Bypass -File .\Test-PersistentFlow.ps1 -Label laptop
 ```
-
-Or double‑click `Run-OutageTest.bat`.
 
 Results are written under `logs\`.
 
@@ -31,11 +31,7 @@ Results are written under `logs\`.
 
 ## Laptop vs desktop comparison
 
-On **both** machines, same Wi‑Fi, around the same time:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\Test-PersistentFlow.ps1 -DurationSec 300 -Label machine-name
-```
+On **both** machines, start `Run-OutageTest.bat` before the same 5‑minute mark. Each run lasts 10 minutes from that mark.
 
 Compare the summary lines:
 
