@@ -12,7 +12,10 @@
     * public STUN servers accept at high rate without rate-limiting
     * return the observed public IP:port, so a NAT rebind is directly visible
 
-  Reports loss, burst outages (consecutive losses), and any mapping change.
+  Reports loss, burst outages (consecutive losses), delay spikes, and any mapping change.
+
+  Every packet slower than SpikeMs is logged with a timestamp. Several of those
+  close together are a delay clump: packets still arrived, but the path paused.
 #>
 [CmdletBinding()]
 param(
@@ -21,6 +24,8 @@ param(
   [int]$TimeoutMs = 1000,
   [int]$DurationSec = 600,
   [int]$BurstThreshold = 3,
+  [int]$SpikeMs = 100,
+  [int]$ClumpGapMs = 400,
   [string]$Label = "persistent",
   [bool]$SyncToFiveMin = $true
 )
@@ -90,6 +95,7 @@ foreach ($s in $Servers) {
       Name = $host_; Addr = $addr.ToString(); Port = $port; Client = $c; LocalPort = $lp
       Pending = @{}; Sent = 0; Recv = 0; Lost = 0
       Rtts = (New-Object System.Collections.Generic.List[double])
+      Spikes = (New-Object System.Collections.Generic.List[object])
       ConsecLost = 0; Mapped = $null; MapChanges = 0
       Bursts = (New-Object System.Collections.Generic.List[object])
     }
@@ -104,7 +110,7 @@ Write-Host ""
 Write-Host "=== Persistent UDP flow test (game-like) ===" -ForegroundColor Cyan
 Write-Host ("Rate {0} pkt/s per flow, duration {1} min, timeout {2}ms" -f $RateHz, ([math]::Round($DurationSec / 60, 1)), $TimeoutMs)
 Write-Host "Each flow keeps ONE socket and ONE source port for the entire run." -ForegroundColor Gray
-Write-Host "Play normally. Outages of 3+ consecutive packets are flagged." -ForegroundColor Yellow
+Write-Host ("Play normally. Losses of {0}+ packets are flagged. Every packet slower than {1}ms is logged." -f $BurstThreshold, $SpikeMs) -ForegroundColor Yellow
 Write-Host ""
 
 if ($SyncToFiveMin) {
@@ -165,6 +171,13 @@ try {
             $f.Rtts.Add($rtt)
             $f.Pending.Remove($resp.Tid)
             $f.Recv++
+            if ($rtt -ge $SpikeMs) {
+              $ts = Get-Date
+              $rttRound = [math]::Round($rtt, 1)
+              $f.Spikes.Add([pscustomobject]@{ Time = $ts; Rtt = $rttRound })
+              Write-Host ("[{0}] SLOW {1}: {2}ms" -f $ts.ToString('HH:mm:ss.fff'), $f.Name, $rttRound) -ForegroundColor Yellow
+              $rows.Add(("{0},{1},slow,{2}ms" -f $ts.ToString('o'), $f.Name, $rttRound))
+            }
             if ($f.ConsecLost -ge $BurstThreshold) {
               $ts = Get-Date
               $f.Bursts.Add([pscustomobject]@{ Time = $ts; Count = $f.ConsecLost; Ms = [math]::Round($f.ConsecLost * $intervalMs) })
@@ -213,6 +226,7 @@ try {
     sent $($f.Sent)  recv $($f.Recv)  lost $($f.Lost)  ($([math]::Round(100.0*$f.Lost/[math]::Max(1,$f.Sent),2))%)
     rtt avg ${avg}ms  p99 ${p99}ms  max ${mx}ms
     outages (>=$BurstThreshold consecutive): $($f.Bursts.Count)
+    slow packets (>=${SpikeMs}ms): $($f.Spikes.Count)
     NAT mapping: $($f.Mapped)   rebinds observed: $($f.MapChanges)
 $(($f.Bursts | Select-Object -First 25 | ForEach-Object { "      {0}  {1} pkts (~{2}ms)" -f $_.Time.ToString('HH:mm:ss.fff'), $_.Count, $_.Ms }) -join "`n")
 "@
@@ -228,12 +242,78 @@ $(($f.Bursts | Select-Object -First 25 | ForEach-Object { "      {0}  {1} pkts (
     }
   }
 
+  $clumps = @()
+  foreach ($f in $flows) {
+    $open = $null
+    foreach ($s in $f.Spikes) {
+      if (-not $open) {
+        $open = [pscustomobject]@{ Flow = $f.Name; Start = $s.Time; Last = $s.Time; N = 1; Max = $s.Rtt }
+      } elseif (($s.Time - $open.Last).TotalMilliseconds -le $ClumpGapMs) {
+        $open.Last = $s.Time
+        $open.N = $open.N + 1
+        if ($s.Rtt -gt $open.Max) { $open.Max = $s.Rtt }
+      } else {
+        if ($open.N -ge $BurstThreshold) { $clumps += $open }
+        $open = [pscustomobject]@{ Flow = $f.Name; Start = $s.Time; Last = $s.Time; N = 1; Max = $s.Rtt }
+      }
+    }
+    if ($open -and $open.N -ge $BurstThreshold) { $clumps += $open }
+  }
+
+  $allSpikes = @()
+  foreach ($f in $flows) {
+    foreach ($s in $f.Spikes) {
+      $allSpikes += [pscustomobject]@{ Time = $s.Time; Flow = $f.Name; Rtt = $s.Rtt }
+    }
+  }
+  $sortedS = @($allSpikes | Sort-Object Time)
+  $shared = @()
+  $consumed = @{}
+  for ($i = 0; $i -lt $sortedS.Count; $i++) {
+    if ($consumed.ContainsKey($i)) { continue }
+    $names = @{}
+    $names[$sortedS[$i].Flow] = $true
+    $maxRtt = $sortedS[$i].Rtt
+    $n = 1
+    for ($j = $i + 1; $j -lt $sortedS.Count; $j++) {
+      if (($sortedS[$j].Time - $sortedS[$i].Time).TotalMilliseconds -gt 1500) { break }
+      $consumed[$j] = $true
+      $names[$sortedS[$j].Flow] = $true
+      $n++
+      if ($sortedS[$j].Rtt -gt $maxRtt) { $maxRtt = $sortedS[$j].Rtt }
+    }
+    if ($names.Count -ge 2) {
+      $shared += [pscustomobject]@{ Time = $sortedS[$i].Time; Flows = (($names.Keys | Sort-Object) -join ' + '); Count = $n; Max = $maxRtt }
+    }
+  }
+
+  $clumpLines = if ($clumps.Count) {
+    ($clumps | Sort-Object Start | ForEach-Object {
+      $span = [math]::Round(($_.Last - $_.Start).TotalMilliseconds, 0)
+      "  {0}  {1,-24} {2} slow pkts  max {3}ms  span {4}ms" -f $_.Start.ToString('HH:mm:ss.fff'), $_.Flow, $_.N, $_.Max, $span
+    }) -join "`n"
+  } else { "  (none)" }
+
+  $sharedLines = if ($shared.Count) {
+    ($shared | ForEach-Object {
+      "  {0}  {1} pkts  max {2}ms  {3}" -f $_.Time.ToString('HH:mm:ss.fff'), $_.Count, $_.Max, $_.Flows
+    }) -join "`n"
+  } else { "  (none)" }
+
+  $spikeLines = if ($sortedS.Count) {
+    ($sortedS | Select-Object -First 200 | ForEach-Object {
+      "  {0}  {1,-24} {2}ms" -f $_.Time.ToString('HH:mm:ss.fff'), $_.Flow, $_.Rtt
+    }) -join "`n"
+  } else { "  (none)" }
+  if ($sortedS.Count -gt 200) { $spikeLines += "`n  ... $($sortedS.Count - 200) more in the CSV" }
+
   $text = @"
 Persistent UDP flow summary
 Label:   $Label
 Started: $($start.ToString('o'))
 Elapsed: $([math]::Round(((Get-Date)-$start).TotalSeconds,1)) s
 Rate:    $RateHz pkt/s per flow
+Slow threshold: ${SpikeMs}ms
 
 $($lines -join "`n")
 
@@ -242,6 +322,15 @@ Total outages across all flows: $($sortedB.Count)
 
 Timeline of all outages:
 $(($sortedB | Select-Object -First 60 | ForEach-Object { "  {0}  {1,-24} ~{2}ms" -f $_.Time.ToString('HH:mm:ss.fff'), $_.Flow, $_.Ms }) -join "`n")
+
+Delay clumps ($BurstThreshold+ packets slower than ${SpikeMs}ms, each within ${ClumpGapMs}ms of the last): $($clumps.Count)
+$clumpLines
+
+Slow packets on 2+ flows within 1.5s (shared delay): $($shared.Count)
+$sharedLines
+
+Every slow packet:
+$spikeLines
 
 CSV: $csv
 "@
