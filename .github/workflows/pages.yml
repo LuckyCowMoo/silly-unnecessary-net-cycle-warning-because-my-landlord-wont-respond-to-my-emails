@@ -1,0 +1,38 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage site
+        run: |
+          mkdir -p _site
+          cp -r timeline-web/* _site/
+          # Friendly note when opened without the local probe
+          cat > _site/404.html << 'EOF'
+          <!DOCTYPE html><meta charset="utf-8"><title>Not found</title>
+          <p>Missing file. Open <a href="./">the timeline</a>.</p>
+          EOF
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

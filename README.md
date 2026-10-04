@@ -1,45 +1,32 @@
-# Network outage detector
+# Silly unnecessary net cycle warning because my landlord won’t respond to my emails
 
-Cross-machine tools to tell whether brief network dropouts are **this PC** or **the network/path**.
+A local STUN latency timeline with a 31‑second cycle clock, binary hit/miss strip, and optional pre‑spike beeps — built because the building network stutters on a schedule and emailing the landlord did nothing.
 
-Run the same test on two machines on the same Wi‑Fi. If both see similar loss/outages, it's the network. If only one does, it's that machine.
+## Quick start (live monitoring)
 
-## Quick start (Windows)
+1. Install [Python 3](https://www.python.org/downloads/)
+2. Double‑click `Open-SpikeTimeline.bat`  
+   (or: `powershell -File Open-SpikeTimeline.ps1`)
+3. Browser opens at `http://127.0.0.1:8765/` — probing runs **in memory** while the tab is open
 
-1. Clone or download this repo.
-2. Open PowerShell in the repo folder.
-3. Double‑click `Run-OutageTest.bat` on both machines.
+No disk recorder required. Close the tab to pause probing; close the server window to stop.
 
-The test waits until the next 5‑minute clock mark (`:00`, `:05`, `:10`, …), then runs for 10 minutes. Start both machines any time in the same 5‑minute window and they begin together.
+## GitHub Pages UI
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\Test-PersistentFlow.ps1 -Label laptop
-```
+The static UI is on GitHub Pages. For live STUN data, also run the local probe (`Open-SpikeTimeline.bat`). The page will talk to `http://127.0.0.1:8765` when hosted on `github.io`.
 
-Results are written under `logs\`.
+## Controls
 
-## What each script does
+| Key | Action |
+|-----|--------|
+| **L** | Live window (−1.5 min / +45 s) |
+| **T** | Scroll with time (keep zoom/pan, slide forward) |
+| **S** | Sound warning (3 countdown beeps + hit/miss tones) |
+| **R** | Fit all |
+| Wheel / drag | Zoom / pan |
 
-| Script | Use when |
-|--------|----------|
-| `Test-PersistentFlow.ps1` | **Best A/B test.** Holds long-lived UDP flows (like games/Discord) and reports loss, multi-packet outages, every packet slower than 100 ms, and NAT rebinds. |
-| `Monitor-Long.ps1` | Long session (default 45 min). Note the clock when you feel a stutter and match it to the live log. |
-| `Detect-Dropout.ps1` | High-rate gateway ping dropout detector (gateway ICMP can be rate-limited — treat carefully). |
-| `Detect-Correlated.ps1` | Low-rate multi-target check: gateway vs public IPs vs local freezes. |
-| `Test-RealTraffic.ps1` | UDP DNS + ICMP + TCP comparison. |
-| `Watch-UdpBurst.ps1` | Watches for local UDP socket bursts / port exhaustion. |
+## What’s in the box
 
-## Laptop vs desktop comparison
-
-On **both** machines, start `Run-OutageTest.bat` before the same 5‑minute mark. Each run lasts 10 minutes from that mark.
-
-Compare the summary lines:
-
-- `outages (>=3 consecutive)` and `Outages hitting 2+ flows`
-- per-flow loss %
-- `NAT rebinds observed`
-
-**Same outages on both** → path / Wi‑Fi / ISP.  
-**Only one machine** → that PC (driver, VPN, filter, power save, etc.).
-
-No admin rights required for the main tests. Logs stay local; nothing is uploaded.
+- `Serve-SpikeTimeline.py` — local HTTP + UDP STUN probe
+- `timeline-web/` — canvas UI (clock, chart, binary slots, sound)
+- `Open-SpikeTimeline.ps1` / `.bat` — launcher

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Spike timeline</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="head-main">
+      <div class="head-text">
+        <h1 id="title">Loading…</h1>
+        <p id="stats" class="mono"></p>
+        <p id="next" class="mono next"></p>
+        <p class="hint">Live STUN while tab open · L=live · T=scroll · S=sound warn · Wheel=zoom · Drag=pan</p>
+      </div>
+      <div class="head-actions">
+        <button id="liveBtn" class="live" type="button">Live (−1.5m / +45s)</button>
+        <button id="followBtn" class="follow on" type="button">Scroll with time  ON</button>
+        <button id="soundBtn" class="sound" type="button" title="Warn 3s before expected spike">Sound  OFF</button>
+        <div class="clock" aria-label="Next expected spike">
+          <canvas id="clock" width="72" height="72"></canvas>
+          <div id="clockLabel" class="mono">--</div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <section class="map-wrap">
+    <canvas id="map" height="56"></canvas>
+  </section>
+
+  <section class="arrow-rail" aria-hidden="true">
+    <canvas id="arrowsTop"></canvas>
+  </section>
+
+  <section class="main-wrap">
+    <canvas id="main"></canvas>
+    <div id="tip" class="tip hidden"></div>
+  </section>
+
+  <section class="arrow-rail" aria-hidden="true">
+    <canvas id="arrowsBot"></canvas>
+  </section>
+
+  <section class="bin-wrap">
+    <canvas id="bin" height="48"></canvas>
+  </section>
+
+  <section class="events-wrap">
+    <pre id="events" class="mono"></pre>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
