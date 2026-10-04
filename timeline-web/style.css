@@ -17,7 +17,8 @@
   --map-h: 44px;
   --arrow-h: 12px;
   --bin-h: 40px;
-  --events-h: 72px;
+  --tally-h: 58px;
+  --events-h: 56px;
 }
 
 * { box-sizing: border-box; }
@@ -39,6 +40,7 @@ body {
     minmax(0, 1fr)
     var(--arrow-h)
     var(--bin-h)
+    var(--tally-h)
     var(--events-h);
   gap: var(--gap);
   padding: var(--pad);
@@ -144,6 +146,23 @@ button.sound.on { background: var(--orange); color: #111; }
   border: none;
 }
 .bin-wrap { height: 100%; }
+.tally-wrap {
+  height: 100%;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  overflow: auto;
+  padding: 4px 8px;
+  min-height: 0;
+}
+#tally {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--mute);
+  white-space: pre-wrap;
+}
+#tally .hit { color: var(--darkred); }
+#tally .miss { color: var(--mint); }
 .events-wrap {
   height: 100%;
   overflow: auto;
@@ -181,7 +200,8 @@ canvas {
     --map-h: 36px;
     --arrow-h: 10px;
     --bin-h: 34px;
-    --events-h: 56px;
+    --tally-h: 48px;
+    --events-h: 48px;
   }
   .clock canvas {
     width: 56px !important;

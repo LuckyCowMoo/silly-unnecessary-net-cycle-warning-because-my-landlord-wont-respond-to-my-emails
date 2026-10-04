@@ -23,6 +23,7 @@
     main: document.getElementById("main"),
     arrowsBot: document.getElementById("arrowsBot"),
     bin: document.getElementById("bin"),
+    tally: document.getElementById("tally"),
     tip: document.getElementById("tip"),
     events: document.getElementById("events"),
   };
@@ -39,6 +40,7 @@
     spikes: [],         // visible + buffer (padded for slot colouring)
     samples: [],        // visible buckets
     slotHits: new Map(), // expected-slot time → major on-time (survives scroll-off)
+    slotResults: new Map(), // expected-slot time → true(hit)/false(miss) once window closes
     minimap: [],        // {has, large}
     hits: [],           // hover targets in main canvas css px
     drag: null,
@@ -141,6 +143,103 @@
       }
     }
     return false;
+  }
+
+  /** Finalize past slots into hit/miss results for the rolling tally. */
+  function updateSlotResults() {
+    if (state.anchor == null) return;
+    const cycle = CYCLE_SEC * 1000;
+    const tip = followTipMs();
+    const finalizeAfter = ON_TIME_MS + 600;
+    // Anchor slot is the first large spike by definition
+    state.slotResults.set(state.anchor, true);
+    state.slotHits.set(state.anchor, true);
+    let s = state.anchor + cycle;
+    let guard = 0;
+    while (s + finalizeAfter < tip && guard < 20000) {
+      guard++;
+      if (majorOnTime(s)) {
+        state.slotResults.set(s, true); // late data can upgrade a miss → hit
+      } else if (!state.slotResults.has(s)) {
+        state.slotResults.set(s, false);
+      }
+      s += cycle;
+    }
+  }
+
+  function streakStats() {
+    const slots = [...state.slotResults.keys()].sort((a, b) => a - b);
+    let outcomes = slots.map((t) => state.slotResults.get(t));
+    // Drop the opening miss run before the first hit (recording warmup / pre-anchor gap)
+    const firstHit = outcomes.indexOf(true);
+    if (firstHit > 0) outcomes = outcomes.slice(firstHit);
+    else if (firstHit < 0) outcomes = [];
+    let hits = 0, misses = 0;
+    for (const o of outcomes) {
+      if (o) hits++;
+      else misses++;
+    }
+    const total = hits + misses;
+    const hitHist = {};
+    const missHist = {};
+    let maxHit = 0, maxMiss = 0;
+    let i = 0;
+    while (i < outcomes.length) {
+      const val = outcomes[i];
+      let j = i + 1;
+      while (j < outcomes.length && outcomes[j] === val) j++;
+      const len = j - i;
+      if (val) {
+        hitHist[len] = (hitHist[len] || 0) + 1;
+        if (len > maxHit) maxHit = len;
+      } else {
+        missHist[len] = (missHist[len] || 0) + 1;
+        if (len > maxMiss) maxMiss = len;
+      }
+      i = j;
+    }
+    let curKind = null, curLen = 0;
+    if (outcomes.length) {
+      curKind = outcomes[outcomes.length - 1] ? "hit" : "miss";
+      curLen = 1;
+      for (let k = outcomes.length - 2; k >= 0; k--) {
+        if ((outcomes[k] ? "hit" : "miss") !== curKind) break;
+        curLen++;
+      }
+    }
+    return { hits, misses, total, hitHist, missHist, maxHit, maxMiss, curKind, curLen };
+  }
+
+  function fmtHist(hist, cls) {
+    const keys = Object.keys(hist).map(Number).sort((a, b) => a - b);
+    if (!keys.length) return `<span class="${cls}">(none)</span>`;
+    return keys
+      .map((n) => `<span class="${cls}">${n}-in-a-row ×${hist[n]}</span>`)
+      .join("   ");
+  }
+
+  function renderTally() {
+    if (!els.tally) return;
+    updateSlotResults();
+    const st = streakStats();
+    if (st.total === 0) {
+      els.tally.innerHTML = "Streak tally: waiting for resolved expected slots…";
+      return;
+    }
+    const hitPct = ((100 * st.hits) / st.total).toFixed(1);
+    const missPct = ((100 * st.misses) / st.total).toFixed(1);
+    const cur =
+      st.curKind == null
+        ? ""
+        : `  ·  current <span class="${st.curKind}">${st.curLen} ${st.curKind}${st.curLen === 1 ? "" : "s"}</span>`;
+    els.tally.innerHTML =
+      `<span class="hit">Hits ${st.hits}</span> (${hitPct}%)   ` +
+      `<span class="miss">Misses ${st.misses}</span> (${missPct}%)   ` +
+      `Total ${st.total}   ` +
+      `best <span class="hit">${st.maxHit} hit</span> / <span class="miss">${st.maxMiss} miss</span>` +
+      `${cur}\n` +
+      `Hit streaks (length×count):   ${fmtHist(st.hitHist, "hit")}\n` +
+      `Miss streaks (length×count):  ${fmtHist(st.missHist, "miss")}`;
   }
 
   /** Colour for an expected-slot marker (upcoming / past hit / past miss). */
@@ -479,13 +578,17 @@
   }
 
   function drawMap() {
-    const { ctx, w, h } = sizeCanvas(els.map);
+    const sized = sizeCanvas(els.map);
+    if (!sized) return;
+    const { ctx, w, h } = sized;
     ctx.fillStyle = "#0b0e12";
     ctx.fillRect(0, 0, w, h);
     const cols = state.minimap;
     const n = cols.length || 1;
     const mapLeft = 8;
     const plotW = w - mapLeft - 8;
+
+    // Spike markers (server buckets)
     for (let i = 0; i < cols.length; i++) {
       if (!cols[i].has) continue;
       const x = mapLeft + ((i + 0.5) / n) * plotW;
@@ -498,6 +601,25 @@
       ctx.stroke();
       ctx.globalAlpha = 1;
     }
+
+    // Green lines for resolved expected-slot misses
+    updateSlotResults();
+    if (state.t1 > state.t0) {
+      for (const [slotT, hit] of state.slotResults) {
+        if (hit) continue;
+        if (slotT < state.t0 || slotT > state.t1) continue;
+        const x = xOf(slotT, state.t0, state.t1, w, mapLeft);
+        ctx.beginPath();
+        ctx.moveTo(x, 6);
+        ctx.lineTo(x, h - 6);
+        ctx.strokeStyle = "#7dcea0";
+        ctx.globalAlpha = 0.9;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+
     if (state.t1 > state.t0) {
       const x1 = xOf(state.v0, state.t0, state.t1, w, mapLeft);
       const x2 = xOf(state.v1, state.t0, state.t1, w, mapLeft);
@@ -711,6 +833,7 @@
         drawArrows();
         drawMain();
         drawBin();
+        renderTally();
         state.dirty = false;
       }
     } catch (err) {
