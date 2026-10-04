@@ -993,7 +993,7 @@
       if (t - state.lastFetch > pollMs) {
         state.lastFetch = t;
         await refreshMeta();
-        await refreshEvents();
+        try { await refreshEvents(); } catch {}
       } else if (state.follow && state.recording) {
         // keep pulling samples/spikes while a live run is advancing
         state.needData = true;
@@ -1005,9 +1005,7 @@
         ? " — start Open-SpikeTimeline.bat, or open http://127.0.0.1:8765/"
         : "";
       els.stats.textContent = `sync: ${e.message}${hint}`;
-      els.title.textContent = API_BASE
-        ? "Waiting for local probe on 127.0.0.1:8765"
-        : els.title.textContent;
+      if (API_BASE) els.title.textContent = "Waiting for local probe on 127.0.0.1:8765";
       state.needData = true; // retry next poll
     }
     setTimeout(tick, state.recording ? 250 : 500);
