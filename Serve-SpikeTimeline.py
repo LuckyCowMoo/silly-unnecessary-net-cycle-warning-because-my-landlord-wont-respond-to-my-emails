@@ -566,9 +566,6 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
-        # Explicitly acknowledge Chrome private-network preflight
-        if self.headers.get("Access-Control-Request-Private-Network", "").lower() == "true":
-            self.send_header("Access-Control-Allow-Private-Network", "true")
         self.end_headers()
 
     def do_GET(self):
