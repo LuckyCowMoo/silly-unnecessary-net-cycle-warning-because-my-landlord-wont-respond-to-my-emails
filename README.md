@@ -2,7 +2,15 @@
 
 A local STUN latency timeline with a 31‑second cycle clock, binary hit/miss strip, and optional pre‑spike beeps — built because the building network stutters on a schedule and emailing the landlord did nothing.
 
-## Quick start (live monitoring)
+## Quick start (native app — recommended)
+
+1. Build once: `powershell -File Build-Native.ps1` (needs .NET 8 SDK; installs to `%LOCALAPPDATA%\dotnet` is fine)
+2. Run `dist\NetStutter.exe` — probing starts immediately at **60 Hz** (same STUN servers / thresholds as the Python probe)
+3. Optional: shortcut that exe into your Startup folder so it launches at login
+
+Detection matches `Serve-SpikeTimeline.py` (3 UDP STUN flows, max-RTT per tick, 75 ms minors / 200 ms majors, 31 s cycle).
+
+## Quick start (browser / Python)
 
 1. Install [Python 3](https://www.python.org/downloads/)
 2. Double‑click `Open-SpikeTimeline.bat`  
@@ -29,6 +37,8 @@ The static UI is on GitHub Pages. Browsers block public HTTPS sites from talking
 
 ## What’s in the box
 
-- `Serve-SpikeTimeline.py` — local HTTP + UDP STUN probe
+- `native/NetStutter/` — WinForms app + STUN probe (build → `dist/NetStutter.exe`)
+- `Build-Native.ps1` — publish single-file exe
+- `Serve-SpikeTimeline.py` — local HTTP + UDP STUN probe (browser path)
 - `timeline-web/` — canvas UI (clock, chart, binary slots, sound)
-- `Open-SpikeTimeline.ps1` / `.bat` — launcher
+- `Open-SpikeTimeline.ps1` / `.bat` — browser launcher

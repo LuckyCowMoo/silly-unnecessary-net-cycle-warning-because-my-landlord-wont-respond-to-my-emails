@@ -2,7 +2,7 @@
   const CYCLE_SEC = 31;
   const LIVE_BACK_SEC = 1.5 * 60;
   const LIVE_AHEAD_SEC = 45;
-  const HIGHLIGHT_MS = 125; // mark milder spikes (markers + line peaks)
+  const HIGHLIGHT_MS = 75; // floor; server also marks mean+1σ sample peaks (incl. past)
   const ON_TIME_MS = 100;   // major spike must land within this of expected slot
   const WARN_SEC = 3;       // red clock + warning beeps before expected
   const LEFT = 44;
@@ -13,6 +13,7 @@
     title: document.getElementById("title"),
     stats: document.getElementById("stats"),
     next: document.getElementById("next"),
+    nowClock: document.getElementById("nowClock"),
     liveBtn: document.getElementById("liveBtn"),
     followBtn: document.getElementById("followBtn"),
     soundBtn: document.getElementById("soundBtn"),
@@ -42,7 +43,8 @@
     samples: [],        // visible buckets
     slotHits: new Map(), // expected-slot time → major on-time (survives scroll-off)
     slotResults: new Map(), // expected-slot time → true(hit)/false(miss) once window closes
-    minimap: [],        // {has, large}
+    minimap: [],        // {has, large} server buckets
+    peakMarks: new Map(), // t → {large} accumulated minors/majors for minimap
     hits: [],           // hover targets in main canvas css px
     drag: null,
     dirty: true,
@@ -79,6 +81,22 @@
     const span = v1 - v0;
     const frac = (x - left) / Math.max(1, w - left - 10);
     return v0 + frac * span;
+  }
+
+  /** Minimap domain = recorded data plus whatever the main view covers (incl. live future). */
+  function mapRange() {
+    let m0 = state.t0;
+    let m1 = state.t1;
+    if (state.v1 > state.v0) {
+      if (!(m1 > m0)) {
+        m0 = state.v0;
+        m1 = state.v1;
+      } else {
+        m0 = Math.min(m0, state.v0);
+        m1 = Math.max(m1, state.v1);
+      }
+    }
+    return { m0, m1 };
   }
 
   function fmtTime(ms, withMs = false) {
@@ -146,6 +164,120 @@
     return false;
   }
 
+  function spikesCoverSlot(slotT) {
+    if (!state.spikes.length) return false;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const s of state.spikes) {
+      if (s.t < lo) lo = s.t;
+      if (s.t > hi) hi = s.t;
+    }
+    return slotT >= lo - ON_TIME_MS && slotT <= hi + ON_TIME_MS;
+  }
+
+  /** Mark spikes the server returned (σ outliers, ≥75ms floor, or large). */
+  function isMarkedSpike(s) {
+    if (!s) return false;
+    if (s.large || s.rtt >= 200) return true;
+    if (s.minor) return true;
+    return s.rtt >= HIGHLIGHT_MS;
+  }
+
+  /** mean+1σ of previous 31s segment from currently loaded samples. */
+  function prevSegmentThreshold(t, samples, thrCache) {
+    if (state.anchor == null) return HIGHLIGHT_MS;
+    const cycle = CYCLE_SEC * 1000;
+    const idx = Math.floor((t - state.anchor) / cycle);
+    if (idx < 1) return HIGHLIGHT_MS;
+    const prev = idx - 1;
+    if (thrCache.has(prev)) return thrCache.get(prev);
+    const a0 = state.anchor + prev * cycle;
+    const a1 = a0 + cycle;
+    let sum = 0;
+    let n = 0;
+    for (const s of samples) {
+      if (s.t < a0 || s.t >= a1) continue;
+      sum += s.rtt;
+      n++;
+    }
+    let thr = HIGHLIGHT_MS;
+    if (n >= 8) {
+      const mean = sum / n;
+      let varSum = 0;
+      for (const s of samples) {
+        if (s.t < a0 || s.t >= a1) continue;
+        const d = s.rtt - mean;
+        varSum += d * d;
+      }
+      const std = Math.sqrt(varSum / n);
+      thr = mean + Math.max(std, 5);
+    }
+    thrCache.set(prev, thr);
+    return thr;
+  }
+
+  /** Persist a detected peak so the minimap keeps it after the view scrolls away. */
+  function rememberPeakMark(t, large) {
+    const prev = state.peakMarks.get(t);
+    if (prev && prev.large) return;
+    state.peakMarks.set(t, { large: !!(large || (prev && prev.large)) });
+  }
+
+  function rememberPeakMarksFromSpikes(spikes) {
+    for (const s of spikes) {
+      if (!isMarkedSpike(s)) continue;
+      rememberPeakMark(s.t, !!(s.large || s.rtt >= 200));
+    }
+  }
+
+  /**
+   * Mark local maxima on the sample line (what you see) that beat mean+1σ
+   * of the previous cycle — covers past bumps the probe never logged as spikes.
+   */
+  function mergeSamplePeakMarks(samples) {
+    if (!samples || samples.length < 3) return;
+    const thrCache = new Map();
+    const extras = [];
+    for (let i = 1; i < samples.length - 1; i++) {
+      const s = samples[i];
+      if (s.t < state.v0 || s.t > state.v1) continue;
+      const rtt = s.rtt;
+      // plateau-friendly peak
+      if (rtt < samples[i - 1].rtt || rtt < samples[i + 1].rtt) continue;
+      const large = rtt >= 200;
+      // mean+1σ of prior segment, but never mark below the 75ms minor floor
+      // (raw 1σ alone is ~30ms here and would mark ordinary jitter).
+      const thr = Math.max(prevSegmentThreshold(s.t, samples, thrCache), HIGHLIGHT_MS);
+      if (!large && rtt <= thr) continue;
+      let near = false;
+      for (const x of state.spikes) {
+        if (Math.abs(x.t - s.t) <= 40) { near = true; break; }
+      }
+      if (near) {
+        rememberPeakMark(s.t, large || state.spikes.some(
+          (x) => Math.abs(x.t - s.t) <= 40 && (x.large || x.rtt >= 200)
+        ));
+        continue;
+      }
+      for (const x of extras) {
+        if (Math.abs(x.t - s.t) <= 40) { near = true; break; }
+      }
+      if (near) continue;
+      extras.push({
+        t: s.t,
+        rtt,
+        large,
+        minor: !large,
+        durMs: 1,
+        count: 1,
+        fromSample: true,
+      });
+      rememberPeakMark(s.t, large);
+    }
+    if (!extras.length) return;
+    state.spikes = state.spikes.concat(extras).sort((a, b) => a.t - b.t);
+  }
+
   /** Finalize past slots into hit/miss results for the rolling tally. */
   function updateSlotResults() {
     if (state.anchor == null) return;
@@ -161,7 +293,9 @@
       guard++;
       if (majorOnTime(s)) {
         state.slotResults.set(s, true); // late data can upgrade a miss → hit
-      } else if (!state.slotResults.has(s)) {
+      } else if (!state.slotResults.has(s) && spikesCoverSlot(s)) {
+        // Never mark miss without spike coverage — that painted the whole
+        // minimap green on refresh before past windows were loaded.
         state.slotResults.set(s, false);
       }
       s += cycle;
@@ -246,8 +380,10 @@
   /** Colour for an expected-slot marker (upcoming / past hit / past miss). */
   function slotColor(slotT, n = nowMs()) {
     if (slotT >= n) return "#4a90d9";
-    if (majorOnTime(slotT)) return "#e85d4c";
-    return "#7dcea0";
+    if (majorOnTime(slotT) || state.slotResults.get(slotT) === true) return "#e85d4c";
+    if (state.slotResults.get(slotT) === false) return "#7dcea0";
+    // Past but not resolved yet (no spike coverage / waiting on server) — not a miss
+    return "#5a6a7a";
   }
 
   function eachVisibleSlot(cb) {
@@ -300,6 +436,12 @@
     state.status = m.statusText || "";
     state.recording = !!m.recording;
     state.minimap = m.minimap || [];
+    if (Array.isArray(m.slotOutcomes)) {
+      for (const o of m.slotOutcomes) {
+        state.slotResults.set(o.t, !!o.hit);
+        if (o.hit) state.slotHits.set(o.t, true);
+      }
+    }
     const liveSite = !!m.live;
     const mode = liveSite
       ? (state.recording
@@ -325,15 +467,21 @@
   async function refreshWindowData() {
     // Pad spike fetch by a full cycle so a slot still in the binary strip keeps
     // its hit colour after the expected-time marker scrolls off-screen.
+    // Pad samples by one cycle so mean+1σ can see the previous segment.
     const pad = CYCLE_SEC * 1000 + ON_TIME_MS;
+    const samplePad = CYCLE_SEC * 1000;
     const spQ = `t0=${state.v0 - pad}&t1=${state.v1 + pad}`;
-    const saQ = `t0=${state.v0}&t1=${state.v1}&budget=2400`;
+    const saQ = `t0=${state.v0 - samplePad}&t1=${state.v1}&budget=3600`;
     const [sp, sa] = await Promise.all([
       api(`/api/spikes?${spQ}`),
       api(`/api/samples?${saQ}`),
     ]);
     state.spikes = sp.spikes || [];
-    state.samples = sa.samples || [];
+    rememberPeakMarksFromSpikes(state.spikes);
+    const allSamples = sa.samples || [];
+    // Chart line uses in-view samples only (padded points are for σ / peak merge).
+    state.samples = allSamples.filter((s) => s.t >= state.v0 && s.t <= state.v1);
+    mergeSamplePeakMarks(allSamples);
     for (const s of state.spikes) {
       if (!(s.large || s.rtt >= 200)) continue;
       if (state.anchor == null) continue;
@@ -417,13 +565,13 @@
     // Wider than ON_TIME so late-arriving API rows still count for the hit tone
     const win = Math.max(ON_TIME_MS, 300);
     for (const s of state.spikes) {
-      if (s.rtt < HIGHLIGHT_MS && !s.large) continue;
+      if (!isMarkedSpike(s)) continue;
       if (Math.abs(s.t - slotT) > win) continue;
       if (!best || s.rtt > best.rtt) best = s;
     }
     // Fallback: sample peaks (sometimes land in /api/samples before /api/spikes)
     for (const s of state.samples) {
-      if (s.rtt < HIGHLIGHT_MS) continue;
+      if (s.rtt < HIGHLIGHT_MS && s.rtt < 200) continue;
       if (Math.abs(s.t - slotT) > win) continue;
       if (!best || s.rtt > best.rtt) best = { t: s.t, rtt: s.rtt, durMs: 150, large: s.rtt >= 200 };
     }
@@ -593,49 +741,68 @@
     const cols = state.minimap;
     const n = cols.length || 1;
     const mapLeft = 8;
-    const plotW = w - mapLeft - 8;
+    const { m0, m1 } = mapRange();
+    if (!(m1 > m0)) return;
 
-    // Spike markers (server buckets)
-    for (let i = 0; i < cols.length; i++) {
-      if (!cols[i].has) continue;
-      const x = mapLeft + ((i + 0.5) / n) * plotW;
-      ctx.beginPath();
-      ctx.moveTo(x, 6);
-      ctx.lineTo(x, h - 6);
-      ctx.strokeStyle = cols[i].large ? "#e85d4c" : "#e0a14a";
-      ctx.globalAlpha = 0.85;
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
-
-    // Green lines for resolved expected-slot misses
+    // Expected cycle markers: blue upcoming / red hit / green miss
     updateSlotResults();
-    if (state.t1 > state.t0) {
-      for (const [slotT, hit] of state.slotResults) {
-        if (hit) continue;
-        if (slotT < state.t0 || slotT > state.t1) continue;
-        const x = xOf(slotT, state.t0, state.t1, w, mapLeft);
+    if (state.anchor != null) {
+      const cycle = CYCLE_SEC * 1000;
+      const tip = followTipMs();
+      let s = state.anchor + Math.floor((m0 - state.anchor) / cycle) * cycle;
+      let guard = 0;
+      for (; s <= m1 && guard < 20000; s += cycle, guard++) {
+        if (s < m0) continue;
+        const x = xOf(s, m0, m1, w, mapLeft);
         ctx.beginPath();
-        ctx.moveTo(x, 6);
-        ctx.lineTo(x, h - 6);
-        ctx.strokeStyle = "#7dcea0";
-        ctx.globalAlpha = 0.9;
-        ctx.lineWidth = 1.5;
+        ctx.moveTo(x, 4);
+        ctx.lineTo(x, h - 4);
+        ctx.strokeStyle = slotColor(s, tip);
+        ctx.globalAlpha = s >= tip ? 0.95 : 0.8;
+        ctx.lineWidth = s >= tip ? 1.5 : 1.25;
         ctx.stroke();
         ctx.globalAlpha = 1;
       }
     }
 
-    if (state.t1 > state.t0) {
-      const x1 = xOf(state.v0, state.t0, state.t1, w, mapLeft);
-      const x2 = xOf(state.v1, state.t0, state.t1, w, mapLeft);
-      ctx.fillStyle = "rgba(125,206,160,0.2)";
-      ctx.strokeStyle = "#7dcea0";
-      ctx.lineWidth = 2;
-      ctx.fillRect(x1, 4, Math.max(3, x2 - x1), h - 8);
-      ctx.strokeRect(x1, 4, Math.max(3, x2 - x1), h - 8);
+    // Spike markers: server buckets + every minor/major we've detected in-view
+    const data0 = state.t0;
+    const data1 = state.t1;
+    if (data1 > data0) {
+      for (let i = 0; i < cols.length; i++) {
+        if (!cols[i].has) continue;
+        const t = data0 + ((i + 0.5) / n) * (data1 - data0);
+        const x = xOf(t, m0, m1, w, mapLeft);
+        ctx.beginPath();
+        ctx.moveTo(x, 6);
+        ctx.lineTo(x, h - 6);
+        ctx.strokeStyle = cols[i].large ? "#e85d4c" : "#e0a14a";
+        ctx.globalAlpha = 0.85;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
     }
+    for (const [t, mark] of state.peakMarks) {
+      if (t < m0 || t > m1) continue;
+      const x = xOf(t, m0, m1, w, mapLeft);
+      ctx.beginPath();
+      ctx.moveTo(x, 6);
+      ctx.lineTo(x, h - 6);
+      ctx.strokeStyle = mark.large ? "#e85d4c" : "#e0a14a";
+      ctx.globalAlpha = 0.9;
+      ctx.lineWidth = mark.large ? 1.25 : 1;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    const x1 = xOf(state.v0, m0, m1, w, mapLeft);
+    const x2 = xOf(state.v1, m0, m1, w, mapLeft);
+    ctx.fillStyle = "rgba(125,206,160,0.2)";
+    ctx.strokeStyle = "#7dcea0";
+    ctx.lineWidth = 2;
+    ctx.fillRect(x1, 4, Math.max(3, x2 - x1), h - 8);
+    ctx.strokeRect(x1, 4, Math.max(3, x2 - x1), h - 8);
   }
 
   function drawMain() {
@@ -662,13 +829,15 @@
 
     // expected cycle marks: blue = upcoming, red = past hit, green = past miss
     const n = followTipMs();
+    const slotTimes = [];
     eachVisibleSlot((s) => {
+      slotTimes.push(s);
       const x = xOf(s, state.v0, state.v1, w);
       const future = s >= n;
       const col = slotColor(s, n);
       ctx.beginPath();
       ctx.moveTo(x, 0);
-      ctx.lineTo(x, h - 14);
+      ctx.lineTo(x, h - 18);
       ctx.strokeStyle = col;
       ctx.globalAlpha = future ? 0.9 : 0.85;
       ctx.lineWidth = future ? 1.5 : 1.25;
@@ -683,7 +852,7 @@
     {
       const pts = state.samples.map((s) => ({ t: s.t, rtt: s.rtt }));
       for (const s of state.spikes) {
-        if (s.rtt < HIGHLIGHT_MS) continue;
+        if (!isMarkedSpike(s)) continue;
         if (s.t < state.v0 || s.t > state.v1) continue;
         pts.push({ t: s.t, rtt: s.rtt });
       }
@@ -703,13 +872,28 @@
       }
     }
 
-    // spike markers — circle + very faint stem; skip mild RTTs / off-screen
+    // Collapse multi-flow / sample-peak twins into one marker (peak RTT).
+    const MARK_GAP_MS = 400;
+    const markList = [];
     for (const s of state.spikes) {
-      if (s.rtt < HIGHLIGHT_MS) continue;
+      if (!isMarkedSpike(s)) continue;
       if (s.t < state.v0 || s.t > state.v1) continue;
+      const prev = markList.length ? markList[markList.length - 1] : null;
+      if (prev && s.t - prev.t <= MARK_GAP_MS) {
+        if (s.rtt > prev.rtt) {
+          prev.t = s.t; prev.rtt = s.rtt; prev.large = !!(s.large || s.rtt >= 200);
+        } else if (s.large || s.rtt >= 200) {
+          prev.large = true;
+        }
+        continue;
+      }
+      markList.push({ t: s.t, rtt: s.rtt, large: !!(s.large || s.rtt >= 200), s });
+    }
+    let lastLabelX = -1e9;
+    for (const s of markList) {
       const x = xOf(s.t, state.v0, state.v1, w);
       const y = h - 20 - (Math.min(maxRtt, s.rtt) / maxRtt) * plotH;
-      const large = !!s.large;
+      const large = s.large;
       ctx.beginPath();
       ctx.moveTo(x, 6);
       ctx.lineTo(x, h - 16);
@@ -726,7 +910,15 @@
       ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 0.8;
       ctx.stroke();
-      state.hits.push({ x, y, r: rad + 4, s });
+      if (x - lastLabelX >= 28) {
+        lastLabelX = x;
+        const label = s.rtt >= 100 ? `${Math.round(s.rtt)}ms` : `${s.rtt.toFixed(1)}ms`;
+        ctx.fillStyle = large ? "#e85d4c" : "#e0a14a";
+        ctx.font = "10px Consolas, monospace";
+        ctx.textAlign = "left";
+        ctx.fillText(label, x + rad + 2, y - 4);
+      }
+      state.hits.push({ x, y, r: rad + 4, s: s.s || s });
     }
 
     {
@@ -742,13 +934,18 @@
       }
     }
 
+    // Bottom times anchored under each expected-slot line
     ctx.fillStyle = "#6b7c8f";
     ctx.font = "10px Consolas, monospace";
-    for (let i = 0; i <= 5; i++) {
-      const t = state.v0 + ((state.v1 - state.v0) * i) / 5;
+    ctx.textAlign = "center";
+    let lastSlotLabelX = -1e9;
+    for (const t of slotTimes) {
       const x = xOf(t, state.v0, state.v1, w);
-      ctx.fillText(fmtTime(t), x - 22, h - 6);
+      if (x - lastSlotLabelX < 36) continue;
+      lastSlotLabelX = x;
+      ctx.fillText(fmtTime(t), x, h - 6);
     }
+    ctx.textAlign = "left";
 
     const viewMin = (state.v1 - state.v0) / 60000;
     const dataMin = (state.t1 - state.t0) / 60000;
@@ -781,8 +978,9 @@
       if (s1 < state.v0 || s > state.v1) continue;
       let fill;
       if (s >= n) fill = "#2e6eb5"; // upcoming
-      else if (majorOnTime(s)) fill = "#c0392b"; // on-time major
-      else fill = "#1e8449"; // miss
+      else if (majorOnTime(s) || state.slotResults.get(s) === true) fill = "#c0392b";
+      else if (state.slotResults.get(s) === false) fill = "#1e8449"; // miss
+      else fill = "#3d4f61"; // unresolved
       const x1 = xOf(Math.max(s, state.v0), state.v0, state.v1, w);
       const x2 = xOf(Math.min(s1, state.v1), state.v0, state.v1, w);
       const bw = Math.max(1, x2 - x1 - gap);
@@ -833,6 +1031,7 @@
           state.dirty = true;
         }
       }
+      if (els.nowClock) els.nowClock.textContent = fmtTime(wall);
       drawClock();
       tickWarnAudio();
       if (state.dirty || (state.follow && state.recording)) {
@@ -934,7 +1133,8 @@
     leaveFollow();
     const p = canvasPos(els.map, ev);
     const w = els.map.clientWidth;
-    const t = tOf(p.x, state.t0, state.t1, w, 8);
+    const { m0, m1 } = mapRange();
+    const t = tOf(p.x, m0, m1, w, 8);
     const span = state.v1 - state.v0;
     state.v0 = t - span / 2;
     state.v1 = t + span / 2;

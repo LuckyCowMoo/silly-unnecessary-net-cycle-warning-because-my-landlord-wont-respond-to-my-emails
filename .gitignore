@@ -9,3 +9,8 @@ __pycache__/
 *.pyc
 .venv/
 _site/
+dist/
+native/NetStutter/bin/
+native/NetStutter/obj/
+*.user
+*.suo

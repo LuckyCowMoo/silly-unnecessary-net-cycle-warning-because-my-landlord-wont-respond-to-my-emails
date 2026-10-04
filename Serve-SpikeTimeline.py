@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import socket
+import statistics
 import threading
 import time
 import webbrowser
@@ -22,8 +23,10 @@ ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "timeline-web"
 CYCLE_SEC = 31.0
 LARGE_MS = 200.0
-HIGHLIGHT_MS = 125.0  # mark milder spikes in the viewer
-SPIKE_MS = 80.0       # log / keep peaks from this RTT up
+HIGHLIGHT_MS = 75.0  # absolute floor + fallback when no prior-segment stats
+SPIKE_MS = 75.0      # log / keep peaks from this RTT up
+ON_TIME_MS = 100.0   # major must land within this of expected slot
+MIN_SEG_SAMPLES = 8  # need this many samples before trusting mean+σ
 CLUMP_GAP_MS = 400.0
 RATE_HZ = 60  # closer to frame-rate jitter graphs; catches short blips
 TIMEOUT_MS = 1500
@@ -81,6 +84,7 @@ class DataStore:
         self._dur: list[float] = []
         self._count: list[int] = []
         self._clumps_dirty = False
+        self._seg_thr: dict[int, float] = {}
         self.started = now_ms()
         self.sent = 0
         self.slow = 0
@@ -106,6 +110,7 @@ class DataStore:
                 lo += 1
             if lo:
                 del self.samples[:lo]
+                self._seg_thr.clear()
         if self.spikes and self.spikes[0]["t"] < cut:
             lo = 0
             while lo < len(self.spikes) and self.spikes[lo]["t"] < cut:
@@ -122,6 +127,7 @@ class DataStore:
         self.spikes.append({"t": t, "rtt": rtt, "large": large, "flow": flow})
         if self.anchor is None and large:
             self.anchor = t
+            self._seg_thr.clear()
         # Defer O(n) clump rebuild — doing it on every spike stalled the probe
         # thread and dropped delayed STUN replies (missed majors).
         self._clumps_dirty = True
@@ -131,6 +137,94 @@ class DataStore:
         tag = "  LARGE" if large else ""
         hh = datetime.fromtimestamp(t / 1000.0).strftime("%H:%M:%S.%f")[:-3]
         self.add_event(f"{hh}  {flow}  {rtt:.1f}ms{tag}")
+
+    def _sample_index_at_or_after(self, t: float) -> int:
+        lo, hi = 0, len(self.samples)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self.samples[mid]["t"] < t:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    def _seg_index(self, t: float) -> int | None:
+        if self.anchor is None:
+            return None
+        return int((t - self.anchor) // (CYCLE_SEC * 1000.0))
+
+    def _segment_threshold(self, seg_idx: int) -> float:
+        """mean + 1σ for a completed cycle segment; HIGHLIGHT_MS if unknown."""
+        if self.anchor is None or seg_idx < 0:
+            return HIGHLIGHT_MS
+        cur_idx = self._seg_index(self.samples[-1]["t"]) if self.samples else None
+        cacheable = cur_idx is not None and seg_idx < cur_idx
+        if cacheable and seg_idx in self._seg_thr:
+            return self._seg_thr[seg_idx]
+        cycle = CYCLE_SEC * 1000.0
+        a0 = self.anchor + seg_idx * cycle
+        a1 = a0 + cycle
+        i = self._sample_index_at_or_after(a0)
+        xs: list[float] = []
+        while i < len(self.samples) and self.samples[i]["t"] < a1:
+            xs.append(self.samples[i]["rtt"])
+            i += 1
+        if len(xs) < MIN_SEG_SAMPLES:
+            thr = HIGHLIGHT_MS
+        else:
+            mean = statistics.fmean(xs)
+            std = statistics.pstdev(xs)
+            # mean+1σ, but never tighter than +5ms (avoids marking every blip when σ≈0)
+            thr = mean + max(std, 5.0)
+        if cacheable:
+            self._seg_thr[seg_idx] = thr
+        return thr
+
+    def _outlier_threshold(self, t: float) -> float:
+        """Threshold = mean+1σ of the previous 31s segment (anchor-aligned)."""
+        idx = self._seg_index(t)
+        if idx is None or idx < 1:
+            return HIGHLIGHT_MS
+        return self._segment_threshold(idx - 1)
+
+    def _is_outlier(self, t: float, rtt: float) -> bool:
+        if rtt >= LARGE_MS:
+            return True
+        # mean+1σ of prior segment, floored at HIGHLIGHT_MS so ordinary
+        # jitter (σ≈5–10ms over a ~25ms baseline) is not all marked.
+        return rtt > max(self._outlier_threshold(t), HIGHLIGHT_MS)
+
+    def _sample_peak_highlights(self, t0: float, t1: float) -> list[dict]:
+        """Local maxima in samples (incl. past) that beat previous-segment mean+1σ."""
+        if not self.samples or t1 <= t0:
+            return []
+        # Neighbours outside the window needed for peak test; prior cycle for σ.
+        pad = CYCLE_SEC * 1000.0
+        i0 = max(0, self._sample_index_at_or_after(t0 - pad) - 1)
+        i1 = min(len(self.samples), self._sample_index_at_or_after(t1 + 1.0) + 1)
+        out: list[dict] = []
+        for i in range(max(1, i0 + 1), min(i1, len(self.samples) - 1)):
+            s = self.samples[i]
+            if s["t"] < t0 or s["t"] > t1:
+                continue
+            rtt = s["rtt"]
+            if rtt < self.samples[i - 1]["rtt"] or rtt < self.samples[i + 1]["rtt"]:
+                continue
+            if not self._is_outlier(s["t"], rtt):
+                continue
+            large = rtt >= LARGE_MS
+            out.append(
+                {
+                    "t": s["t"],
+                    "rtt": rtt,
+                    "large": large,
+                    "minor": not large,
+                    "flow": s.get("flow") or "",
+                    "durMs": 1,
+                    "count": 1,
+                }
+            )
+        return out
 
     def _rebuild_clumps(self):
         self._dur = []
@@ -183,20 +277,50 @@ class DataStore:
 
     def minimap(self, cols: int = 800) -> list[dict]:
         out = [{"has": False, "large": False} for _ in range(cols)]
-        if not self.spikes:
-            return out
         t0, t1 = self.bounds()
         span = max(1.0, t1 - t0)
         for s in self.spikes:
-            if s["rtt"] < HIGHLIGHT_MS:
+            if not (
+                s.get("large")
+                or self._is_outlier(s["t"], s["rtt"])
+                or s["rtt"] >= HIGHLIGHT_MS
+            ):
                 continue
             frac = (s["t"] - t0) / span
             if frac < 0 or frac > 1:
                 continue
             c = min(cols - 1, max(0, int(frac * cols)))
             out[c]["has"] = True
-            if s["large"]:
+            if s.get("large") or s["rtt"] >= LARGE_MS:
                 out[c]["large"] = True
+        return out
+
+    def slot_outcomes(self) -> list[dict]:
+        """Resolved expected-slot hit/miss using the full in-memory spike set."""
+        if self.anchor is None:
+            return []
+        cycle = CYCLE_SEC * 1000.0
+        tip = now_ms()
+        finalize_after = ON_TIME_MS + 600.0
+        larges = [
+            s["t"]
+            for s in self.spikes
+            if s.get("large") or s["rtt"] >= LARGE_MS
+        ]
+        out: list[dict] = []
+        s = float(self.anchor)
+        guard = 0
+        li = 0
+        while s + finalize_after < tip and guard < 20000:
+            guard += 1
+            if s == self.anchor:
+                hit = True
+            else:
+                while li < len(larges) and larges[li] < s - ON_TIME_MS:
+                    li += 1
+                hit = li < len(larges) and larges[li] <= s + ON_TIME_MS
+            out.append({"t": s, "hit": hit})
+            s += cycle
         return out
 
     def spikes_in(self, t0: float, t1: float, budget: int = 400) -> list[dict]:
@@ -208,30 +332,41 @@ class DataStore:
                 lo = mid + 1
             else:
                 hi = mid
-        vis = []
+        out: list[dict] = []
         i = lo
         while i < len(self.spikes) and self.spikes[i]["t"] <= t1:
-            if self.spikes[i]["rtt"] >= HIGHLIGHT_MS:
-                vis.append(i)
+            s = self.spikes[i]
+            if s.get("large") or self._is_outlier(s["t"], s["rtt"]) or s["rtt"] >= HIGHLIGHT_MS:
+                out.append(
+                    {
+                        "t": s["t"],
+                        "rtt": s["rtt"],
+                        "large": s["large"],
+                        "minor": (not s.get("large")) and s["rtt"] < LARGE_MS,
+                        "flow": s["flow"],
+                        "durMs": int(self._dur[i]) if i < len(self._dur) else 1,
+                        "count": int(self._count[i]) if i < len(self._count) else 1,
+                    }
+                )
             i += 1
-        step = 1
-        if len(vis) > budget:
-            step = math.ceil(len(vis) / budget)
-        out = []
-        for k, idx in enumerate(vis):
-            s = self.spikes[idx]
-            if (k % step) != 0 and not s["large"]:
+
+        # Also mark sample-line peaks in this window (covers past bumps never logged).
+        near_ms = 40.0
+        existing_t = [r["t"] for r in out]
+        for peak in self._sample_peak_highlights(t0, t1):
+            if any(abs(peak["t"] - t) <= near_ms for t in existing_t):
                 continue
-            out.append(
-                {
-                    "t": s["t"],
-                    "rtt": s["rtt"],
-                    "large": s["large"],
-                    "flow": s["flow"],
-                    "durMs": int(self._dur[idx]) if idx < len(self._dur) else 1,
-                    "count": int(self._count[idx]) if idx < len(self._count) else 1,
-                }
-            )
+            out.append(peak)
+            existing_t.append(peak["t"])
+
+        out.sort(key=lambda r: r["t"])
+        if len(out) > budget:
+            step = math.ceil(len(out) / budget)
+            kept = []
+            for k, row in enumerate(out):
+                if row.get("large") or (k % step) == 0:
+                    kept.append(row)
+            out = kept
         return out
 
     def samples_in(self, t0: float, t1: float, budget: int = 1200) -> list[dict]:
@@ -377,14 +512,14 @@ class StunProbe(threading.Thread):
 
                 if batch_samples or batch_spikes:
                     with self.store.lock:
-                        for t_wall, rtt, flow, large in batch_spikes:
+                        # One spike + one sample per tick = worst among the 3 STUN
+                        # flows. Logging every flow produced stacked twin markers.
+                        if batch_spikes:
+                            t_wall, rtt, flow, large = max(batch_spikes, key=lambda x: x[1])
                             self.store.slow += 1
                             if large:
                                 self.store.large += 1
                             self.store.add_spike(t_wall, rtt, flow, large)
-                        # One point per tick = worst reply among the 3 STUN flows.
-                        # Plotting every flow separately zigzags between their
-                        # different baselines (looks like a two-level square wave).
                         if batch_samples:
                             peak = max(batch_samples, key=lambda x: x[1])
                             self.store.add_sample(peak[0], peak[1], peak[2])
@@ -597,6 +732,7 @@ class Handler(BaseHTTPRequestHandler):
                         "spikeCount": len(STORE.spikes),
                         "sampleCount": len(STORE.samples),
                         "minimap": STORE.minimap(900),
+                        "slotOutcomes": STORE.slot_outcomes(),
                     }
                 return self._json(payload)
             if path == "/api/spikes":
