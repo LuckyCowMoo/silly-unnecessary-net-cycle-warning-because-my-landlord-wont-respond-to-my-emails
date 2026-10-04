@@ -1,4 +1,5 @@
 using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using NetStutter.Probe;
 
 namespace NetStutter;
@@ -82,10 +83,10 @@ internal sealed class MainForm : Form
                 null, p, new object[] { true });
         }
 
-        _map.Paint += (_, e) => DrawMap(e.Graphics, _map.ClientSize);
-        _main.Paint += (_, e) => DrawMain(e.Graphics, _main.ClientSize);
-        _bin.Paint += (_, e) => DrawBin(e.Graphics, _bin.ClientSize);
-        _clock.Paint += (_, e) => DrawClock(e.Graphics, _clock.ClientSize);
+        _map.Paint += (_, e) => { ApplyNiceGraphics(e.Graphics); DrawMap(e.Graphics, _map.ClientSize); };
+        _main.Paint += (_, e) => DrawMainHiRes(e.Graphics, _main.ClientSize);
+        _bin.Paint += (_, e) => { ApplyNiceGraphics(e.Graphics); DrawBin(e.Graphics, _bin.ClientSize); };
+        _clock.Paint += (_, e) => { ApplyNiceGraphics(e.Graphics); DrawClock(e.Graphics, _clock.ClientSize); };
 
         WireInput();
         SetLiveWindow();
@@ -624,9 +625,48 @@ internal sealed class MainForm : Form
         if (_audioResolved && u < -2) _audioTarget = null;
     }
 
-    private void DrawClock(Graphics g, Size sz)
+    private static void ApplyNiceGraphics(Graphics g)
     {
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        g.CompositingQuality = CompositingQuality.HighQuality;
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+    }
+
+    /// <summary>
+    /// 2× supersample the main chart then scale down — smooth line with negligible cost
+    /// for this point count (~few thousand samples at ~30 fps).
+    /// </summary>
+    private void DrawMainHiRes(Graphics screen, Size sz)
+    {
+        if (sz.Width < 2 || sz.Height < 2) return;
+        const float scale = 2f;
+        var bw = Math.Max(1, (int)(sz.Width * scale));
+        var bh = Math.Max(1, (int)(sz.Height * scale));
+        // Skip supersample on enormous monitors to keep memory bounded.
+        if ((long)bw * bh > 8_000_000)
+        {
+            ApplyNiceGraphics(screen);
+            screen.Clear(Bg);
+            DrawMain(screen, sz);
+            return;
+        }
+        using var bmp = new Bitmap(bw, bh);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            ApplyNiceGraphics(g);
+            g.Clear(Bg);
+            g.ScaleTransform(scale, scale);
+            DrawMain(g, sz);
+        }
+        ApplyNiceGraphics(screen);
+        screen.Clear(Bg);
+        screen.DrawImage(bmp, new Rectangle(0, 0, sz.Width, sz.Height));
+    }
+
+    private void DrawClock(Graphics g, Size sz)
+    {
         g.Clear(Bg);
         var cx = sz.Width / 2f;
         var cy = sz.Height / 2f - 2;
@@ -652,7 +692,6 @@ internal sealed class MainForm : Form
 
     private void DrawMap(Graphics g, Size sz)
     {
-        g.SmoothingMode = SmoothingMode.AntiAlias;
         g.Clear(Bg);
         double t0, t1;
         double? anchor;
@@ -695,8 +734,7 @@ internal sealed class MainForm : Form
 
     private void DrawMain(Graphics g, Size sz)
     {
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Bg);
+        // Caller sets quality / clear (direct paint or 2× supersample).
         const float maxRtt = 400;
         var plotH = sz.Height - 40f;
         using (var pen = new Pen(Grid))
@@ -724,7 +762,11 @@ internal sealed class MainForm : Form
                 if (s < _v0 || s > _v1) continue;
                 slotTimes.Add(s);
                 var x = XOf(s, _v0, _v1, sz.Width);
-                using var pen = new Pen(SlotColor(s, tip), s >= tip ? 1.5f : 1.25f) { DashStyle = DashStyle.Dash };
+                using var pen = new Pen(SlotColor(s, tip), s >= tip ? 1.5f : 1.25f)
+                {
+                    DashStyle = DashStyle.Dash,
+                    LineJoin = LineJoin.Round,
+                };
                 g.DrawLine(pen, x, 0, x, sz.Height - 18);
             }
         }
@@ -740,15 +782,25 @@ internal sealed class MainForm : Form
         pts.Sort((a, b) => a.T.CompareTo(b.T));
         if (pts.Count > 1)
         {
-            using var pen = new Pen(Line, 1.2f);
-            var path = new List<PointF>();
+            var path = new List<PointF>(pts.Count);
             foreach (var (t, rtt) in pts)
             {
                 var x = XOf(t, _v0, _v1, sz.Width);
                 var y = sz.Height - 20 - (float)(Math.Min(maxRtt, rtt) / maxRtt * plotH);
                 path.Add(new PointF(x, y));
             }
-            if (path.Count > 1) g.DrawLines(pen, path.ToArray());
+            if (path.Count > 1)
+            {
+                using var pen = new Pen(Line, 1.35f)
+                {
+                    LineJoin = LineJoin.Round,
+                    StartCap = LineCap.Round,
+                    EndCap = LineCap.Round,
+                };
+                using var gp = new GraphicsPath();
+                gp.AddLines(path.ToArray());
+                g.DrawPath(pen, gp);
+            }
         }
 
         // Collapse multi-flow / sample-peak twins into one marker (peak RTT).

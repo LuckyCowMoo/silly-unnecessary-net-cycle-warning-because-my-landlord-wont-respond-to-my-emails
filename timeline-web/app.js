@@ -658,6 +658,8 @@
     }
     const ctx = c.getContext("2d");
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     return { ctx, w: cssW, h: cssH, dpr };
   }
 
@@ -867,7 +869,9 @@
           else ctx.lineTo(x, y);
         }
         ctx.strokeStyle = "#4a90a4";
-        ctx.lineWidth = 1.2;
+        ctx.lineWidth = 1.35;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
         ctx.stroke();
       }
     }
