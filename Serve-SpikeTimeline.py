@@ -523,11 +523,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cors(self):
         origin = self.headers.get("Origin", "")
-        # Allow local probe to feed the GitHub Pages UI
-        if origin.endswith(".github.io") or origin.startswith("http://127.0.0.1") or origin.startswith("http://localhost"):
-            self.send_header("Access-Control-Allow-Origin", origin or "*")
+        # Allow GitHub Pages (HTTPS) to call this local probe (HTTP localhost).
+        # Chrome also requires Allow-Private-Network on the preflight.
+        if (
+            origin.endswith(".github.io")
+            or origin.startswith("http://127.0.0.1")
+            or origin.startswith("http://localhost")
+        ):
+            self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header(
+                "Access-Control-Allow-Headers",
+                "Content-Type, Access-Control-Request-Private-Network",
+            )
+            self.send_header("Access-Control-Allow-Private-Network", "true")
             self.send_header("Vary", "Origin")
 
     def _json(self, obj, code=200):
@@ -557,6 +566,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
+        # Explicitly acknowledge Chrome private-network preflight
+        if self.headers.get("Access-Control-Request-Private-Network", "").lower() == "true":
+            self.send_header("Access-Control-Allow-Private-Network", "true")
         self.end_headers()
 
     def do_GET(self):

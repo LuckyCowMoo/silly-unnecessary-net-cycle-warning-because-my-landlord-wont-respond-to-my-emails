@@ -13,7 +13,9 @@ No disk recorder required. Close the tab to pause probing; close the server wind
 
 ## GitHub Pages UI
 
-The static UI is on GitHub Pages. For live STUN data, also run the local probe (`Open-SpikeTimeline.bat`). The page will talk to `http://127.0.0.1:8765` when hosted on `github.io`.
+The static UI is on GitHub Pages. Browsers block public HTTPS sites from talking to localhost unless the local probe allows it — run an up-to-date `Open-SpikeTimeline.bat` (CORS + private-network headers), leave it open, then reload the Pages tab.
+
+**Most reliable:** use `http://127.0.0.1:8765/` from the bat file (same machine, no cross-origin).
 
 ## Controls
 

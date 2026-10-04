@@ -26,6 +26,7 @@
     tally: document.getElementById("tally"),
     tip: document.getElementById("tip"),
     events: document.getElementById("events"),
+    probeBanner: document.getElementById("probeBanner"),
   };
 
   const state = {
@@ -285,8 +286,14 @@
     return r.json();
   }
 
+  function setProbeBanner(show) {
+    if (!els.probeBanner) return;
+    els.probeBanner.classList.toggle("hidden", !show);
+  }
+
   async function refreshMeta() {
     const m = await api("/api/meta");
+    setProbeBanner(false);
     state.t0 = m.t0;
     state.t1 = m.t1;
     state.anchor = m.anchor;
@@ -993,8 +1000,9 @@
       }
       if (state.needData) await refreshWindowData();
     } catch (e) {
+      if (API_BASE) setProbeBanner(true);
       const hint = API_BASE
-        ? " — start local probe: Open-SpikeTimeline.bat (port 8765)"
+        ? " — start Open-SpikeTimeline.bat, or open http://127.0.0.1:8765/"
         : "";
       els.stats.textContent = `sync: ${e.message}${hint}`;
       els.title.textContent = API_BASE

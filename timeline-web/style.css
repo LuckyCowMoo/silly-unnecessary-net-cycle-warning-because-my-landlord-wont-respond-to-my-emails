@@ -35,6 +35,7 @@ body {
   display: grid;
   grid-template-rows:
     var(--header-h)
+    auto
     var(--map-h)
     var(--arrow-h)
     minmax(0, 1fr)
@@ -47,6 +48,22 @@ body {
   height: 100dvh;
   max-height: 100dvh;
 }
+.probe-banner {
+  background: #3a2410;
+  border: 1px solid var(--orange);
+  color: #f0d9b5;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  border-radius: 4px;
+}
+.probe-banner a { color: #7dcea0; }
+.probe-banner code {
+  background: #1a1208;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.probe-banner.hidden { display: none; }
 .mono { font-family: Consolas, "Cascadia Mono", monospace; }
 
 header {
