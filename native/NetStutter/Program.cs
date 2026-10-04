@@ -7,8 +7,8 @@ internal static class Program
     [STAThread]
     static void Main()
     {
-        ApplicationConfiguration.Initialize();
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        ApplicationConfiguration.Initialize();
         var store = new DataStore();
         using var probe = new StunProbe(store);
         probe.Start();

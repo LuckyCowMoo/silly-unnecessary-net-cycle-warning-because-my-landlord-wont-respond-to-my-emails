@@ -17,8 +17,9 @@ internal sealed class MainForm : Form
     private readonly Label _tally = new();
     private readonly Label _clockLabel = new();
     private readonly Label _nowClock = new(); // large current time, top center
-    private readonly Panel _clock = new() { Width = 56, Height = 56 };
-    private readonly Font _nowFont = new("Consolas", 28f, FontStyle.Bold);
+    private readonly Panel _clock = new() { Width = 52, Height = 52 };
+    private Font _nowFont = new("Consolas", 26f, FontStyle.Bold);
+    private Panel? _topBar;
     private readonly Button _liveBtn = new();
     private readonly Button _followBtn = new();
     private readonly Button _soundBtn = new();
@@ -64,11 +65,13 @@ internal sealed class MainForm : Form
         Text = "Net Stutter — native probe";
         Width = 1280;
         Height = 800;
-        MinimumSize = new Size(900, 560);
+        MinimumSize = new Size(960, 600);
         BackColor = Bg;
         ForeColor = Color.FromArgb(0xcf, 0xd8, 0xe3);
         Font = _ui;
         DoubleBuffered = true;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96f, 96f);
 
         BuildChrome();
         foreach (var p in new[] { _map, _main, _bin, _clock })
@@ -98,46 +101,46 @@ internal sealed class MainForm : Form
 
     private void BuildChrome()
     {
-        var top = new Panel { Dock = DockStyle.Top, Height = 96, BackColor = Bg };
-        top.Resize += (_, _) => LayoutNowClock(top);
+        // Tall enough for 125–150% laptop DPI so buttons / slider / clock aren't clipped.
+        var top = new Panel { Dock = DockStyle.Top, Height = 132, BackColor = Bg, Padding = new Padding(8, 6, 8, 6) };
+        _topBar = top;
+        top.Resize += (_, _) => LayoutHeader(top);
 
         _title.AutoSize = true;
-        _title.Location = new Point(10, 8);
         _title.ForeColor = Color.White;
         _stats.AutoSize = true;
-        _stats.Location = new Point(10, 32);
         _stats.ForeColor = Dim;
         _stats.Font = _mono;
         _next.AutoSize = true;
-        _next.Location = new Point(10, 54);
         _next.ForeColor = Green;
         _next.Font = _mono;
-        _next.MaximumSize = new Size(420, 0);
+        _next.MaximumSize = new Size(380, 0);
 
-        _nowClock.AutoSize = false;
+        _nowClock.AutoSize = true;
         _nowClock.Font = _nowFont;
         _nowClock.ForeColor = Color.White;
         _nowClock.TextAlign = ContentAlignment.MiddleCenter;
         _nowClock.BackColor = Bg;
         _nowClock.Text = DateTime.Now.ToString("HH:mm:ss");
-        _nowClock.Width = 220;
-        _nowClock.Height = 48;
+        // Force room for seconds even when DPI scales the font wider than expected.
+        _nowClock.MinimumSize = new Size(280, 40);
+        _nowClock.Padding = new Padding(8, 0, 8, 0);
 
         foreach (var b in new[] { _liveBtn, _followBtn, _soundBtn })
         {
             b.FlatStyle = FlatStyle.Flat;
             b.ForeColor = Color.White;
             b.BackColor = Color.FromArgb(0x1a, 0x22, 0x2e);
-            b.Height = 30;
-            b.Margin = new Padding(0);
+            b.Height = 28;
+            b.Margin = new Padding(0, 0, 6, 0);
             b.Padding = new Padding(0);
             b.Cursor = Cursors.Hand;
             b.AutoSize = false;
             b.TextAlign = ContentAlignment.MiddleCenter;
         }
-        _liveBtn.Width = 108;
-        _followBtn.Width = 108;
-        _soundBtn.Width = 88;
+        _liveBtn.Width = 100;
+        _followBtn.Width = 100;
+        _soundBtn.Width = 84;
         _liveBtn.Click += (_, _) =>
         {
             if (_live && _follow) { _live = false; _lastFollowNow = Constants.NowMs(); UpdateFollowBtns(); }
@@ -151,45 +154,53 @@ internal sealed class MainForm : Form
         };
         _soundBtn.Click += (_, _) => { _sound = !_sound; UpdateFollowBtns(); };
 
-        // Fixed right cluster: buttons + rate slider + countdown clock.
         var right = new Panel
         {
             Dock = DockStyle.Right,
-            Width = 420,
+            Width = 400,
             BackColor = Bg,
-            Padding = new Padding(8, 10, 12, 8),
         };
+
         _clockLabel.AutoSize = false;
-        _clockLabel.Width = 64;
-        _clockLabel.Height = 16;
+        _clockLabel.Size = new Size(56, 16);
         _clockLabel.ForeColor = Color.White;
         _clockLabel.Font = _mono;
         _clockLabel.TextAlign = ContentAlignment.MiddleCenter;
-        _clock.SetBounds(0, 0, 56, 56);
-        var clockWrap = new Panel { Width = 64, Height = 76, Left = 340, Top = 6 };
-        _clock.Left = 4;
-        _clockLabel.Top = 58;
-        _clockLabel.Left = 0;
+        _clock.Size = new Size(52, 52);
+        var clockWrap = new Panel { Width = 60, Height = 72 };
+        _clock.Location = new Point(4, 0);
+        _clockLabel.Location = new Point(2, 54);
         clockWrap.Controls.Add(_clock);
         clockWrap.Controls.Add(_clockLabel);
 
-        _liveBtn.SetBounds(8, 8, 108, 28);
-        _followBtn.SetBounds(122, 8, 108, 28);
-        _soundBtn.SetBounds(236, 8, 88, 28);
+        var btnRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            WrapContents = false,
+            FlowDirection = FlowDirection.LeftToRight,
+            BackColor = Bg,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
+        btnRow.Controls.Add(_liveBtn);
+        btnRow.Controls.Add(_followBtn);
+        btnRow.Controls.Add(_soundBtn);
 
-        _rateLabel.AutoSize = false;
-        _rateLabel.SetBounds(8, 42, 80, 18);
+        _rateLabel.AutoSize = true;
         _rateLabel.Font = _mono;
         _rateLabel.ForeColor = Dim;
         _rateLabel.Text = "Rate 60Hz";
+        _rateLabel.Margin = new Padding(0, 6, 8, 0);
 
-        _rateSlider.SetBounds(90, 38, 234, 30);
+        // No bottom ticks — those were getting clipped on scaled laptop displays.
         _rateSlider.Minimum = 0;
         _rateSlider.Maximum = Constants.RateChoices.Length - 1;
-        _rateSlider.TickFrequency = 1;
-        _rateSlider.TickStyle = TickStyle.BottomRight;
+        _rateSlider.TickStyle = TickStyle.None;
         _rateSlider.SmallChange = 1;
         _rateSlider.LargeChange = 1;
+        _rateSlider.Width = 160;
+        _rateSlider.Height = 28;
+        _rateSlider.Margin = new Padding(0, 2, 0, 0);
         _rateSlider.Value = Array.IndexOf(Constants.RateChoices, Constants.DefaultRateHz);
         if (_rateSlider.Value < 0) _rateSlider.Value = 0;
         _rateSlider.BackColor = Bg;
@@ -200,19 +211,44 @@ internal sealed class MainForm : Form
             _rateLabel.Text = $"Rate {hz}Hz";
         };
 
-        right.Controls.Add(_liveBtn);
-        right.Controls.Add(_followBtn);
-        right.Controls.Add(_soundBtn);
-        right.Controls.Add(_rateLabel);
-        right.Controls.Add(_rateSlider);
+        var rateRow = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            WrapContents = false,
+            FlowDirection = FlowDirection.LeftToRight,
+            BackColor = Bg,
+            Margin = new Padding(0, 4, 0, 0),
+        };
+        rateRow.Controls.Add(_rateLabel);
+        rateRow.Controls.Add(_rateSlider);
+
+        var controlsCol = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            BackColor = Bg,
+            Location = new Point(8, 8),
+        };
+        controlsCol.Controls.Add(btnRow);
+        controlsCol.Controls.Add(rateRow);
+
+        clockWrap.Location = new Point(320, 8);
+        right.Controls.Add(controlsCol);
         right.Controls.Add(clockWrap);
 
+        var left = new Panel { Dock = DockStyle.Left, Width = 360, BackColor = Bg };
+        _title.Location = new Point(4, 6);
+        _stats.Location = new Point(4, 30);
+        _next.Location = new Point(4, 54);
+        left.Controls.Add(_title);
+        left.Controls.Add(_stats);
+        left.Controls.Add(_next);
+
         top.Controls.Add(right);
+        top.Controls.Add(left);
         top.Controls.Add(_nowClock);
-        top.Controls.Add(_title);
-        top.Controls.Add(_stats);
-        top.Controls.Add(_next);
-        LayoutNowClock(top);
+        LayoutHeader(top);
 
         _tally.Dock = DockStyle.Bottom;
         _tally.Height = 54;
@@ -228,13 +264,20 @@ internal sealed class MainForm : Form
         UpdateFollowBtns();
     }
 
-    private void LayoutNowClock(Control top)
+    private void LayoutHeader(Control top)
     {
-        // Keep the big clock visually centered in the header (accounting for right cluster).
-        const int rightW = 420;
-        var avail = Math.Max(200, top.ClientSize.Width - rightW);
-        _nowClock.Left = Math.Max(0, (avail - _nowClock.Width) / 2);
-        _nowClock.Top = (top.ClientSize.Height - _nowClock.Height) / 2;
+        // Center HH:mm:ss in the remaining middle band; keep full seconds visible.
+        _nowClock.Text = DateTime.Now.ToString("HH:mm:ss");
+        var rightW = 400;
+        var leftW = 360;
+        var mid = Math.Max(200, top.ClientSize.Width - leftW - rightW);
+        var size = TextRenderer.MeasureText(_nowClock.Text, _nowClock.Font);
+        var w = Math.Max(_nowClock.MinimumSize.Width, size.Width + 24);
+        var h = Math.Max(_nowClock.MinimumSize.Height, size.Height + 8);
+        _nowClock.Size = new Size(w, h);
+        _nowClock.Left = leftW + Math.Max(0, (mid - w) / 2);
+        _nowClock.Top = Math.Max(0, (top.ClientSize.Height - h) / 2);
+        _nowClock.BringToFront();
     }
 
     private void UpdateFollowBtns()
@@ -472,6 +515,7 @@ internal sealed class MainForm : Form
         }
 
         _nowClock.Text = DateTime.Now.ToString("HH:mm:ss");
+        if (_topBar is not null) LayoutHeader(_topBar);
         RefreshViewData();
         RenderNextAndTally();
         TickWarnAudio();
