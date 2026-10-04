@@ -14,6 +14,11 @@
         <p id="stats" class="mono"></p>
         <p id="next" class="mono next"></p>
         <p class="hint">Live STUN while tab open · L=live · T=scroll · S=sound warn · Wheel=zoom · Drag=pan</p>
+        <div id="probeBanner" class="probe-banner hidden" role="status">
+          <strong>No local probe connected.</strong>
+          Run <code>Open-SpikeTimeline.bat</code> on this PC, leave it open, then reload.
+          Or use <a href="http://127.0.0.1:8765/">http://127.0.0.1:8765/</a> directly (most reliable).
+        </div>
       </div>
       <div class="head-actions">
         <button id="liveBtn" class="live" type="button">Live (−1.5m / +45s)</button>
@@ -26,12 +31,6 @@
       </div>
     </div>
   </header>
-
-  <div id="probeBanner" class="probe-banner hidden" role="status">
-    <strong>No local probe connected.</strong>
-    Run <code>Open-SpikeTimeline.bat</code> on this PC, leave it open, then reload.
-    Or use <a href="http://127.0.0.1:8765/">http://127.0.0.1:8765/</a> directly (most reliable).
-  </div>
 
   <section class="map-wrap">
     <canvas id="map" height="56"></canvas>

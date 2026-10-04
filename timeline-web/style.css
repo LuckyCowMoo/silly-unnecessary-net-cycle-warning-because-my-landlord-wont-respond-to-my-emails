@@ -12,13 +12,13 @@
   --darkred: #c0392b;
   --pad: 10px;
   --gap: 4px;
-  --header-h: 104px;
+  --header-h: 96px;
   --blue: #4a90d9;
-  --map-h: 44px;
+  --map-h: 52px;
   --arrow-h: 12px;
   --bin-h: 40px;
-  --tally-h: 58px;
-  --events-h: 56px;
+  --tally-h: 52px;
+  --events-h: 48px;
 }
 
 * { box-sizing: border-box; }
@@ -35,10 +35,9 @@ body {
   display: grid;
   grid-template-rows:
     var(--header-h)
-    auto
     var(--map-h)
     var(--arrow-h)
-    minmax(0, 1fr)
+    minmax(120px, 1fr)
     var(--arrow-h)
     var(--bin-h)
     var(--tally-h)
@@ -49,13 +48,15 @@ body {
   max-height: 100dvh;
 }
 .probe-banner {
+  margin-top: 4px;
   background: #3a2410;
   border: 1px solid var(--orange);
   color: #f0d9b5;
-  padding: 8px 10px;
-  font-size: 12px;
-  line-height: 1.4;
+  padding: 6px 8px;
+  font-size: 11px;
+  line-height: 1.35;
   border-radius: 4px;
+  white-space: normal;
 }
 .probe-banner a { color: #7dcea0; }
 .probe-banner code {
@@ -213,12 +214,12 @@ canvas {
 
 @media (max-height: 700px) {
   :root {
-    --header-h: 78px;
-    --map-h: 36px;
+    --header-h: 72px;
+    --map-h: 40px;
     --arrow-h: 10px;
-    --bin-h: 34px;
-    --tally-h: 48px;
-    --events-h: 48px;
+    --bin-h: 32px;
+    --tally-h: 44px;
+    --events-h: 40px;
   }
   .clock canvas {
     width: 56px !important;
