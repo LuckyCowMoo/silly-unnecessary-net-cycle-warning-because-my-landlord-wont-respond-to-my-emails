@@ -1,5 +1,6 @@
 (() => {
-  const CYCLE_SEC = 31;
+  const CYCLE_SEC_DEFAULT = 31;
+  // Learned from major-spike gaps (server); falls back to 31s until enough samples.
   const LIVE_BACK_SEC = 1.5 * 60;
   const LIVE_AHEAD_SEC = 45;
   const HIGHLIGHT_MS = 75; // floor; server also marks mean+1σ sample peaks (incl. past)
@@ -37,6 +38,8 @@
     t0: 0, t1: 1,       // full data range (unix ms)
     v0: 0, v1: 1,       // visible range
     anchor: null,       // unix ms
+    cycleMs: CYCLE_SEC_DEFAULT * 1000,
+    cycleSamples: 0,
     status: "",
     recording: false,
     spikes: [],         // visible + buffer (padded for slot colouring)
@@ -62,6 +65,9 @@
   };
 
   function nowMs() { return Date.now(); }
+
+  function cycleMs() { return state.cycleMs || CYCLE_SEC_DEFAULT * 1000; }
+  function cycleSec() { return cycleMs() / 1000; }
 
   /** Tip of the timeline for follow/live: wall clock while recording, else last sample. */
   function followTipMs() {
@@ -186,7 +192,7 @@
   /** mean+1σ of previous 31s segment from currently loaded samples. */
   function prevSegmentThreshold(t, samples, thrCache) {
     if (state.anchor == null) return HIGHLIGHT_MS;
-    const cycle = CYCLE_SEC * 1000;
+    const cycle = cycleMs();
     const idx = Math.floor((t - state.anchor) / cycle);
     if (idx < 1) return HIGHLIGHT_MS;
     const prev = idx - 1;
@@ -281,7 +287,7 @@
   /** Finalize past slots into hit/miss results for the rolling tally. */
   function updateSlotResults() {
     if (state.anchor == null) return;
-    const cycle = CYCLE_SEC * 1000;
+    const cycle = cycleMs();
     const tip = followTipMs();
     const finalizeAfter = ON_TIME_MS + 600;
     // Anchor slot is the first large spike by definition
@@ -388,7 +394,7 @@
 
   function eachVisibleSlot(cb) {
     if (state.anchor == null || state.v1 <= state.v0) return;
-    const cycle = CYCLE_SEC * 1000;
+    const cycle = cycleMs();
     let slot0 = state.anchor + Math.floor((state.v0 - state.anchor) / cycle) * cycle;
     const span = state.v1 - state.v0;
     const approxSlots = span / cycle;
@@ -433,6 +439,8 @@
     state.t0 = m.t0;
     state.t1 = m.t1;
     state.anchor = m.anchor;
+    if (typeof m.cycleMs === "number" && m.cycleMs > 0) state.cycleMs = m.cycleMs;
+    if (typeof m.cycleSamples === "number") state.cycleSamples = m.cycleSamples;
     state.status = m.statusText || "";
     state.recording = !!m.recording;
     state.minimap = m.minimap || [];
@@ -468,8 +476,8 @@
     // Pad spike fetch by a full cycle so a slot still in the binary strip keeps
     // its hit colour after the expected-time marker scrolls off-screen.
     // Pad samples by one cycle so mean+1σ can see the previous segment.
-    const pad = CYCLE_SEC * 1000 + ON_TIME_MS;
-    const samplePad = CYCLE_SEC * 1000;
+    const pad = cycleMs() + ON_TIME_MS;
+    const samplePad = cycleMs();
     const spQ = `t0=${state.v0 - pad}&t1=${state.v1 + pad}`;
     const saQ = `t0=${state.v0 - samplePad}&t1=${state.v1}&budget=3600`;
     const [sp, sa] = await Promise.all([
@@ -485,7 +493,7 @@
     for (const s of state.spikes) {
       if (!(s.large || s.rtt >= 200)) continue;
       if (state.anchor == null) continue;
-      const cycle = CYCLE_SEC * 1000;
+      const cycle = cycleMs();
       const slot = state.anchor + Math.round((s.t - state.anchor) / cycle) * cycle;
       if (Math.abs(s.t - slot) <= ON_TIME_MS) state.slotHits.set(slot, true);
     }
@@ -502,7 +510,7 @@
 
   function nextExpected() {
     if (state.anchor == null) return null;
-    const cycle = CYCLE_SEC * 1000;
+    const cycle = cycleMs();
     const n = nowMs();
     let k = Math.ceil((n - state.anchor) / cycle);
     if (n - state.anchor < 0) k = 0;
@@ -686,7 +694,7 @@
 
     // Always-red arc for the last WARN_SEC of the cycle (hand enters this near spike time)
     {
-      const a0 = ((CYCLE_SEC - WARN_SEC) / CYCLE_SEC) * Math.PI * 2 - Math.PI / 2;
+      const a0 = ((cycleSec() - WARN_SEC) / cycleSec()) * Math.PI * 2 - Math.PI / 2;
       const a1 = Math.PI * 2 - Math.PI / 2;
       ctx.beginPath();
       ctx.arc(cx, cy, r, a0, a1, false);
@@ -705,8 +713,8 @@
     // 0 at 12 o'clock; sweeps full circle over one 31s cycle
     let ang = -Math.PI / 2;
     if (exp) {
-      const u = Math.max(0, Math.min(CYCLE_SEC, until));
-      ang = ((CYCLE_SEC - u) / CYCLE_SEC) * Math.PI * 2 - Math.PI / 2;
+      const u = Math.max(0, Math.min(cycleSec(), until));
+      ang = ((cycleSec() - u) / cycleSec()) * Math.PI * 2 - Math.PI / 2;
       els.clockLabel.textContent = fmtTime(exp.next);
       if (until >= 0) {
         els.next.textContent = `Next expected: ${fmtTime(exp.next, true)}   in ${until.toFixed(1)}s`;
@@ -749,7 +757,7 @@
     // Expected cycle markers: blue upcoming / red hit / green miss
     updateSlotResults();
     if (state.anchor != null) {
-      const cycle = CYCLE_SEC * 1000;
+      const cycle = cycleMs();
       const tip = followTipMs();
       let s = state.anchor + Math.floor((m0 - state.anchor) / cycle) * cycle;
       let guard = 0;
@@ -955,7 +963,8 @@
     const dataMin = (state.t1 - state.t0) / 60000;
     els.stats.textContent =
       `spikes ${state.spikes.length} (in view)  samples ${state.samples.length} buckets  ` +
-      `view ${viewMin.toFixed(2)} min  data ${dataMin.toFixed(1)} min  cycle=${CYCLE_SEC}s`;
+      `view ${viewMin.toFixed(2)} min  data ${dataMin.toFixed(1)} min  cycle=${cycleSec().toFixed(3)}s` +
+      (state.cycleSamples >= 10 ? "" : state.cycleSamples > 0 ? ` (learning ${state.cycleSamples}/10)` : "");
   }
 
   function drawBin() {
@@ -971,7 +980,7 @@
     ctx.fillText("31s", LEFT / 2, h / 2 + 3);
     ctx.textAlign = "left";
     if (state.anchor == null || state.v1 <= state.v0) return;
-    const cycle = CYCLE_SEC * 1000;
+    const cycle = cycleMs();
     const n = followTipMs();
     let slot0 = state.anchor + Math.floor((state.v0 - state.anchor) / cycle) * cycle;
     const gap = 2; // clear separator between 31s segments

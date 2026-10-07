@@ -32,6 +32,11 @@ RATE_HZ = 60  # closer to frame-rate jitter graphs; catches short blips
 TIMEOUT_MS = 1500
 KEEP_MS = 6 * 60 * 60 * 1000  # retain ~6h in memory
 CLIENT_IDLE_SEC = 4.0  # stop probing shortly after the tab closes
+CYCLE_LEARN_AFTER = 10
+CYCLE_ROLL_WINDOW = 40
+CYCLE_GAP_MIN_MS = 20_000.0
+CYCLE_GAP_MAX_MS = 45_000.0
+CYCLE_CLUMP_IGNORE_MS = 15_000.0
 STUN_SERVERS = [
     ("stun.l.google.com", 19302),
     ("stun1.l.google.com", 19302),
@@ -81,10 +86,14 @@ class DataStore:
         self.samples: list[dict] = []
         self.events: deque[str] = deque(maxlen=200)
         self.anchor: float | None = None
+        self.cycle_ms: float = CYCLE_SEC * 1000.0
+        self.cycle_samples: int = 0
         self._dur: list[float] = []
         self._count: list[int] = []
         self._clumps_dirty = False
         self._seg_thr: dict[int, float] = {}
+        self._last_major_for_cycle: float | None = None
+        self._cycle_gaps: list[float] = []
         self.started = now_ms()
         self.sent = 0
         self.slow = 0
@@ -128,6 +137,8 @@ class DataStore:
         if self.anchor is None and large:
             self.anchor = t
             self._seg_thr.clear()
+        if large:
+            self._observe_major_spike(t)
         # Defer O(n) clump rebuild — doing it on every spike stalled the probe
         # thread and dropped delayed STUN replies (missed majors).
         self._clumps_dirty = True
@@ -137,6 +148,24 @@ class DataStore:
         tag = "  LARGE" if large else ""
         hh = datetime.fromtimestamp(t / 1000.0).strftime("%H:%M:%S.%f")[:-3]
         self.add_event(f"{hh}  {flow}  {rtt:.1f}ms{tag}")
+
+    def _observe_major_spike(self, t: float) -> None:
+        """After 10 major-to-major gaps, set cycle_ms to their average; keep updating."""
+        prev = self._last_major_for_cycle
+        if prev is not None:
+            gap = t - prev
+            if gap < CYCLE_CLUMP_IGNORE_MS:
+                return
+            if CYCLE_GAP_MIN_MS <= gap <= CYCLE_GAP_MAX_MS:
+                self._cycle_gaps.append(gap)
+                if len(self._cycle_gaps) > CYCLE_ROLL_WINDOW:
+                    del self._cycle_gaps[: len(self._cycle_gaps) - CYCLE_ROLL_WINDOW]
+                self.cycle_samples = len(self._cycle_gaps)
+                if len(self._cycle_gaps) >= CYCLE_LEARN_AFTER:
+                    avg = statistics.fmean(self._cycle_gaps)
+                    self.cycle_ms = max(28_000.0, min(36_000.0, avg))
+                    self._seg_thr.clear()
+        self._last_major_for_cycle = t
 
     def _sample_index_at_or_after(self, t: float) -> int:
         lo, hi = 0, len(self.samples)
@@ -151,7 +180,7 @@ class DataStore:
     def _seg_index(self, t: float) -> int | None:
         if self.anchor is None:
             return None
-        return int((t - self.anchor) // (CYCLE_SEC * 1000.0))
+        return int((t - self.anchor) // self.cycle_ms)
 
     def _segment_threshold(self, seg_idx: int) -> float:
         """mean + 1σ for a completed cycle segment; HIGHLIGHT_MS if unknown."""
@@ -161,7 +190,7 @@ class DataStore:
         cacheable = cur_idx is not None and seg_idx < cur_idx
         if cacheable and seg_idx in self._seg_thr:
             return self._seg_thr[seg_idx]
-        cycle = CYCLE_SEC * 1000.0
+        cycle = self.cycle_ms
         a0 = self.anchor + seg_idx * cycle
         a1 = a0 + cycle
         i = self._sample_index_at_or_after(a0)
@@ -199,7 +228,7 @@ class DataStore:
         if not self.samples or t1 <= t0:
             return []
         # Neighbours outside the window needed for peak test; prior cycle for σ.
-        pad = CYCLE_SEC * 1000.0
+        pad = self.cycle_ms
         i0 = max(0, self._sample_index_at_or_after(t0 - pad) - 1)
         i1 = min(len(self.samples), self._sample_index_at_or_after(t1 + 1.0) + 1)
         out: list[dict] = []
@@ -271,6 +300,8 @@ class DataStore:
             f"sent={self.sent}\n"
             f"slow={self.slow}\n"
             f"large={self.large}\n"
+            f"cycle_ms={self.cycle_ms:.1f}\n"
+            f"cycle_samples={self.cycle_samples}\n"
             f"label={self.label}"
             f"{err}"
         )
@@ -299,7 +330,7 @@ class DataStore:
         """Resolved expected-slot hit/miss using the full in-memory spike set."""
         if self.anchor is None:
             return []
-        cycle = CYCLE_SEC * 1000.0
+        cycle = self.cycle_ms
         tip = now_ms()
         finalize_after = ON_TIME_MS + 600.0
         larges = [
@@ -733,6 +764,8 @@ class Handler(BaseHTTPRequestHandler):
                         "sampleCount": len(STORE.samples),
                         "minimap": STORE.minimap(900),
                         "slotOutcomes": STORE.slot_outcomes(),
+                        "cycleMs": STORE.cycle_ms,
+                        "cycleSamples": STORE.cycle_samples,
                     }
                 return self._json(payload)
             if path == "/api/spikes":

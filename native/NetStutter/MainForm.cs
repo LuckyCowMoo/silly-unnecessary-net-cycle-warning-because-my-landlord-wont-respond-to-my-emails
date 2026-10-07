@@ -291,6 +291,13 @@ internal sealed class MainForm : Form
         _soundBtn.Text = _sound ? "Sound ON" : "Sound";
     }
 
+    private double CycleMs()
+    {
+        lock (_store.Lock) return _store.CycleMs;
+    }
+
+    private double CycleSec() => CycleMs() / 1000.0;
+
     private double FollowTipMs()
     {
         lock (_store.Lock)
@@ -373,7 +380,7 @@ internal sealed class MainForm : Form
     private void UpdateSlotResults(double? anchor)
     {
         if (anchor is null) return;
-        var cycle = Constants.CycleSec * 1000;
+        var cycle = CycleMs();
         var tip = FollowTipMs();
         var finalizeAfter = Constants.OnTimeMs + 600;
         _slotResults[anchor.Value] = true;
@@ -409,8 +416,8 @@ internal sealed class MainForm : Form
         double? anchor;
         lock (_store.Lock)
         {
-            var pad = Constants.CycleSec * 1000 + Constants.OnTimeMs;
-            var samplePad = Constants.CycleSec * 1000;
+            var pad = CycleMs() + Constants.OnTimeMs;
+            var samplePad = CycleMs();
             spikes = _store.SpikesIn(_v0 - pad, _v1 + pad, 800);
             samples = _store.SamplesIn(_v0 - samplePad, _v1, 3600);
             outcomes = _store.SlotOutcomes();
@@ -436,7 +443,7 @@ internal sealed class MainForm : Form
         double? anchor;
         lock (_store.Lock) anchor = _store.Anchor;
         if (anchor is null) return;
-        var cycle = Constants.CycleSec * 1000;
+        var cycle = CycleMs();
         var thrCache = new Dictionary<int, double>();
 
         double Thr(double t)
@@ -512,7 +519,7 @@ internal sealed class MainForm : Form
             _title.Text = $"{mode}  |  native";
             _stats.Text = $"spikes {_store.Spikes.Count}  samples {_store.Samples.Count}  " +
                           $"view {(_v1 - _v0) / 60000:F2} min  data {(t1 - t0) / 60000:F1} min  " +
-                          $"probe={_probe.RateHz}Hz  cycle={Constants.CycleSec}s";
+                          $"probe={_probe.RateHz}Hz  cycle={CycleSec():F3}s";
         }
 
         _nowClock.Text = DateTime.Now.ToString("HH:mm:ss");
@@ -536,7 +543,7 @@ internal sealed class MainForm : Form
         }
         else
         {
-            var cycle = Constants.CycleSec * 1000;
+            var cycle = CycleMs();
             var n = Constants.NowMs();
             var k = Math.Ceiling((n - anchor.Value) / cycle);
             if (n - anchor.Value < 0) k = 0;
@@ -572,7 +579,7 @@ internal sealed class MainForm : Form
         double? anchor;
         lock (_store.Lock) anchor = _store.Anchor;
         if (anchor is null) return;
-        var cycle = Constants.CycleSec * 1000;
+        var cycle = CycleMs();
         var n = Constants.NowMs();
         var k = Math.Ceiling((n - anchor.Value) / cycle);
         if (n - anchor.Value < 0) k = 0;
@@ -677,14 +684,14 @@ internal sealed class MainForm : Form
         double? anchor;
         lock (_store.Lock) anchor = _store.Anchor;
         if (anchor is null) return;
-        var cycle = Constants.CycleSec * 1000;
+        var cycle = CycleMs();
         var n = Constants.NowMs();
         var k = Math.Ceiling((n - anchor.Value) / cycle);
         if (n - anchor.Value < 0) k = 0;
         var next = anchor.Value + k * cycle;
         if (next - n < -50) next += cycle;
-        var until = Math.Clamp((next - n) / 1000.0, 0, Constants.CycleSec);
-        var frac = 1.0 - until / Constants.CycleSec;
+        var until = Math.Clamp((next - n) / 1000.0, 0, CycleSec());
+        var frac = 1.0 - until / CycleSec();
         var warn = until <= Constants.WarnSec && until > 0;
         using var pen = new Pen(warn ? Red : Green, 3);
         g.DrawArc(pen, cx - r, cy - r, r * 2, r * 2, -90, (float)(frac * 360));
@@ -706,7 +713,7 @@ internal sealed class MainForm : Form
         var tip = FollowTipMs();
         if (anchor is not null)
         {
-            var cycle = Constants.CycleSec * 1000;
+            var cycle = CycleMs();
             var s = anchor.Value + Math.Floor((m0 - anchor.Value) / cycle) * cycle;
             var guard = 0;
             for (; s <= m1 && guard < 20000; s += cycle, guard++)
@@ -754,7 +761,7 @@ internal sealed class MainForm : Form
         var slotTimes = new List<double>();
         if (anchor is not null && _v1 > _v0)
         {
-            var cycle = Constants.CycleSec * 1000;
+            var cycle = CycleMs();
             var slot0 = anchor.Value + Math.Floor((_v0 - anchor.Value) / cycle) * cycle;
             var guard = 0;
             for (var s = slot0; s <= _v1 + cycle && guard < 120; s += cycle, guard++)
@@ -882,11 +889,11 @@ internal sealed class MainForm : Form
     {
         g.Clear(Bg);
         using (var br = new SolidBrush(Dim))
-            g.DrawString("31s", _mono, br, 8, sz.Height / 2f - 6);
+            g.DrawString($"{CycleSec():F1}s", _mono, br, 8, sz.Height / 2f - 6);
         double? anchor;
         lock (_store.Lock) anchor = _store.Anchor;
         if (anchor is null || !(_v1 > _v0)) return;
-        var cycle = Constants.CycleSec * 1000;
+        var cycle = CycleMs();
         var n = FollowTipMs();
         var slot0 = anchor.Value + Math.Floor((_v0 - anchor.Value) / cycle) * cycle;
         const int gap = 2;

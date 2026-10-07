@@ -10,6 +10,9 @@ internal sealed class DataStore
     public readonly List<SpikePoint> Spikes = new();
     public readonly ConcurrentQueue<string> Events = new();
     public double? Anchor;
+    /// <summary>Learned cycle length in ms (starts at 31000; averages after 10 observed gaps).</summary>
+    public double CycleMs { get; private set; } = Constants.CycleSec * 1000.0;
+    public int CycleSamples { get; private set; }
     public long Sent;
     public long Slow;
     public long LargeCount;
@@ -22,6 +25,13 @@ internal sealed class DataStore
     private bool _clumpsDirty;
     private readonly Dictionary<int, double> _segThr = new();
     private const int MaxEvents = 200;
+    private double? _lastMajorForCycle;
+    private readonly List<double> _cycleGaps = new();
+    private const int CycleLearnAfter = 10;
+    private const int CycleRollWindow = 40;
+    private const double CycleGapMinMs = 20_000;
+    private const double CycleGapMaxMs = 45_000;
+    private const double CycleClumpIgnoreMs = 15_000;
 
     public void AddEvent(string line)
     {
@@ -68,6 +78,7 @@ internal sealed class DataStore
             Anchor = t;
             _segThr.Clear();
         }
+        if (large) ObserveMajorSpike(t);
         _clumpsDirty = true;
         _dur.Add(1);
         _count.Add(1);
@@ -76,6 +87,34 @@ internal sealed class DataStore
         Slow++;
         var hh = DateTimeOffset.FromUnixTimeMilliseconds((long)t).ToLocalTime().ToString("HH:mm:ss.fff");
         AddEvent($"{hh}  {flow}  {rtt:F1}ms{(large ? "  LARGE" : "")}");
+    }
+
+    /// <summary>
+    /// Learn the true cycle from gaps between major spikes. After 10 gaps, set
+    /// CycleMs to their average and keep updating (rolling window).
+    /// </summary>
+    private void ObserveMajorSpike(double t)
+    {
+        if (_lastMajorForCycle is double prev)
+        {
+            var gap = t - prev;
+            if (gap < CycleClumpIgnoreMs)
+                return; // same stutter clump
+            if (gap >= CycleGapMinMs && gap <= CycleGapMaxMs)
+            {
+                _cycleGaps.Add(gap);
+                while (_cycleGaps.Count > CycleRollWindow)
+                    _cycleGaps.RemoveAt(0);
+                CycleSamples = _cycleGaps.Count;
+                if (_cycleGaps.Count >= CycleLearnAfter)
+                {
+                    var avg = _cycleGaps.Average();
+                    CycleMs = Math.Clamp(avg, 28_000, 36_000);
+                    _segThr.Clear();
+                }
+            }
+        }
+        _lastMajorForCycle = t;
     }
 
     public (double T0, double T1) Bounds()
@@ -120,7 +159,7 @@ internal sealed class DataStore
     private int? SegIndex(double t)
     {
         if (Anchor is null) return null;
-        return (int)Math.Floor((t - Anchor.Value) / (Constants.CycleSec * 1000.0));
+        return (int)Math.Floor((t - Anchor.Value) / CycleMs);
     }
 
     private double SegmentThreshold(int segIdx)
@@ -130,7 +169,7 @@ internal sealed class DataStore
         var cacheable = curIdx is not null && segIdx < curIdx;
         if (cacheable && _segThr.TryGetValue(segIdx, out var cached)) return cached;
 
-        var cycle = Constants.CycleSec * 1000.0;
+        var cycle = CycleMs;
         var a0 = Anchor.Value + segIdx * cycle;
         var a1 = a0 + cycle;
         var i = SampleIndexAtOrAfter(a0);
@@ -173,7 +212,7 @@ internal sealed class DataStore
     {
         var outList = new List<SpikePoint>();
         if (Samples.Count == 0 || t1 <= t0) return outList;
-        var pad = Constants.CycleSec * 1000.0;
+        var pad = CycleMs;
         var i0 = Math.Max(0, SampleIndexAtOrAfter(t0 - pad) - 1);
         var i1 = Math.Min(Samples.Count, SampleIndexAtOrAfter(t1 + 1.0) + 1);
         for (var i = Math.Max(1, i0 + 1); i < Math.Min(i1, Samples.Count - 1); i++)
@@ -287,7 +326,7 @@ internal sealed class DataStore
     {
         var outList = new List<(double, bool)>();
         if (Anchor is null) return outList;
-        var cycle = Constants.CycleSec * 1000.0;
+        var cycle = CycleMs;
         var tip = Constants.NowMs();
         var finalizeAfter = Constants.OnTimeMs + 600.0;
         var larges = Spikes.Where(s => s.Large || s.Rtt >= Constants.LargeMs).Select(s => s.T).ToList();
